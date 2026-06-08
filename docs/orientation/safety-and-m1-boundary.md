@@ -150,18 +150,99 @@ Paths below are **literals or expanduser defaults** in source (observed). They a
 
 Importing these modules mutates the user's home directory without an explicit user action.
 
-### Runtime write sites (selected, observed)
+### Runtime write sites (complete imported-scope inventory, observed)
 
-| Area | Examples | Risk |
-|------|----------|------|
-| Agent logging | `agent.py:39–41` append JSONL to `~/.mac-code/logs/` | Medium |
-| Agent user tools | `agent.py:240–241` write file from LLM content; `1047–1054` `/save` conversation JSON | Medium–High |
-| MLX KV / cache | `mlx/kv_cache.py`, `turboquant.py`, `tiered_cache.py`, `paged_inference.py` — safetensors, gzip, manifests under `~/.mac-code/kv-cache` | Medium |
-| R2 local staging | `mlx/r2_store.py` compress/upload/delete under cache dir | Medium–High |
-| Benchmarks | `mlx/benchmark.py:196`, `mlx/agent_benchmark.py:189` — `Path.unlink()` on cache files | Medium |
-| mlx-sniper preprocess/split | Large binary expert shards under `OUTPUT_DIR` (e.g. `split_*.py`, `split_mlx_model_macbook.py`) | Medium |
-| Calibration | `calibrate.py` writes `sniper_config.json`, `sniper_calibration.npz` into model dir (mlx-sniper and cli-agent copies) | Medium |
-| cli-agent download | `download.py` — `snapshot_download`, preprocess writes, `config.json` | High (network + disk) |
+**Scope note:** HTTP handler `wfile.write` calls in `mlx/mlx_engine.py:284` and `cli-agent/.../server.py:204,207` write to sockets, not the local filesystem; they are omitted below. `chat.py` has no filesystem writes (only `json.dumps` for HTTP payloads).
+
+#### Top-level prototypes
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `agent.py:39–41` | `open(..., "a")` + `write` | `~/.mac-code/logs/interactions-YYYY-MM-DD.jsonl` | Medium |
+| `agent.py:240–241` | `open(filepath, "w")` + `write` | User `work_dir` + LLM-chosen filename (`run_file_tool`) | Medium–High |
+| `agent.py:1047–1054` | `open(save_path, "w")` + `json.dump` | User `work_dir` + `/save` filename (default `conversation-<unix>.json`) | Medium |
+
+#### `mlx/kv_cache.py`
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `mlx/kv_cache.py:24,51` | `cache_path.mkdir` | `~/.mac-code/kv-cache/<name>/` | Medium |
+| `mlx/kv_cache.py:28` | `mx.savez` | `.../<name>/kv_cache.npz` | Medium |
+| `mlx/kv_cache.py:41–42,65–66` | `open(..., "w")` + `json.dump` | `.../<name>/metadata.json` | Medium |
+| `mlx/kv_cache.py:54` | `np.savez_compressed` | `.../<name>/kv_cache.npz` (numpy fallback) | Medium |
+| `mlx/kv_cache.py:106–107` | `gzip.open(..., "wb")` + `write` | `.../<name>/kv_cache.npz.gz` | Medium |
+| `mlx/kv_cache.py:130–131` | `open(..., "wb")` + `write` | Decompress back to `kv_cache.npz` | Medium |
+| `mlx/kv_cache.py:158` | `shutil.rmtree` | Deletes `~/.mac-code/kv-cache/<name>/` | Medium |
+
+#### `mlx/mlx_engine.py`
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `mlx/mlx_engine.py:117` | `cache_dir.mkdir` | `~/.mac-code/kv-cache/` (`save_context`) | Medium |
+| `mlx/mlx_engine.py:134` | `save_prompt_cache(...)` | `~/.mac-code/kv-cache/<name>.safetensors` | Medium |
+| `mlx/mlx_engine.py:139–140` | `open(meta_path, "w")` + `json.dump` | `~/.mac-code/kv-cache/<name>.meta.json` | Medium |
+
+#### `mlx/turboquant.py`
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `mlx/turboquant.py:235` | `np.savez_compressed` | Caller-supplied `path` (compressed KV tensors) | Medium |
+| `mlx/turboquant.py:239–240` | `open(meta_path, "w")` + `json.dump` | Sibling `.meta.json` next to `.npz` | Medium |
+
+#### `mlx/tiered_cache.py`
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `mlx/tiered_cache.py:154` | `mx.savez` | `~/.mac-code/kv-cache/blocks/block_<id>` (SSD eviction) | Medium |
+| `mlx/tiered_cache.py:214–215` | `gzip.open(..., "wb")` + `write` | `<ssd_path>.gz` before R2 upload | Medium |
+| `mlx/tiered_cache.py:226–227` | `os.remove` | Deletes SSD source and `.gz` after R2 upload | Medium |
+| `mlx/tiered_cache.py:267–268` | `open(manifest_path, "w")` + `json.dump` | `~/.mac-code/kv-cache/<name>_manifest.json` | Medium |
+
+#### `mlx/paged_inference.py`
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `mlx/paged_inference.py:79` | `session_dir.mkdir` | `~/.mac-code/kv-cache/paged/<session_name>/` | Medium |
+| `mlx/paged_inference.py:113–114` | `save_prompt_cache(...)` | `.../paged/<session>/chunk_<id>.safetensors` | Medium |
+
+#### `mlx/r2_store.py`
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `mlx/r2_store.py:79–81` | `gzip.open(..., "wb")` + `write` | `~/.mac-code/kv-cache/<name>.safetensors.gz` | Medium |
+| `mlx/r2_store.py:103–104` | `open(dst, "wb")` + `write` | Decompress to `<name>.safetensors` | Medium |
+| `mlx/r2_store.py:174,181` | `client.download_file` | Writes `.safetensors.gz` and `.meta.json` from R2 | Medium–High |
+| `mlx/r2_store.py:245` | `path.unlink` | Deletes local `.safetensors`, `.safetensors.gz`, `.meta.json` | Medium |
+
+#### MLX benchmarks
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `mlx/benchmark.py:196` | `Path.unlink` | Deletes cache file under `~/.mac-code/kv-cache` during benchmark | Medium |
+| `mlx/agent_benchmark.py:189` | `f.unlink` | Same cache cleanup pattern | Medium |
+
+#### `research/expert-sniper/mlx-sniper/` (standalone scripts)
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `split_mlx_model_macbook.py:83–99` | `open(..., "wb")` + `write` | Paged expert shard files under `OUTPUT_DIR` | Medium |
+| `split_mlx_model_macbook.py:179` | `mx.save_safetensors` | `OUTPUT_DIR/pinned.safetensors` | Medium |
+| `split_mlx_model_macbook.py:278–279` | `open(..., "w")` + `json.dump` | `OUTPUT_DIR/config.json` | Medium |
+| `split_35b_v2.py:80–95,112,149–150,157` | `open`/`mx.save_safetensors`/`json.dump`/`shutil.copy` | Layer shards, `pinned.safetensors`, `config.json`, tokenizer files under `OUTPUT_DIR` | Medium |
+| `split_30b.py:54–56,118–140,187–188,196` | `mx.savez`/`save_safetensors`/`open`/`shutil.copy` | Same split/preprocess pattern under `OUTPUT_DIR` | Medium |
+| `calibrate.py:345–348` | `open(..., "w")` + `json.dump`; `np.savez_compressed` | `<model_dir>/sniper_config.json`, `sniper_calibration.npz` | Medium |
+
+#### `research/expert-sniper/cli-agent/src/mlx_expert_sniper/`
+
+| Location | API / operation | Target path | Risk |
+|----------|-----------------|-------------|------|
+| `preprocess.py:80–95,112,149–150,157` | `open`/`mx.save_safetensors`/`json.dump`/`shutil.copy` | Expert shards and `config.json` under hardcoded `OUTPUT_DIR` | Medium |
+| `preprocess_gemma4.py:118,157,209–224` | Same pattern | `output_dir` argument (default under model paths) | Medium |
+| `download.py:139` | `shutil.rmtree` | Removes partial download directory on failure | Medium |
+| `download.py:224–239,281–296,304,342,349` | `open`/`mx.save_safetensors`/`json.dump`/`shutil.copy` | Downloaded model tree + split shards under `output_dir` | High (network + disk) |
+| `calibrate.py:392–395` | `open(..., "w")` + `json.dump`; `np.savez_compressed` | `<model_dir>/sniper_config.json`, `sniper_calibration.npz` | Medium |
+
+**Observed:** MoE agent scripts (`moe_agent_*.py`) read `config.json` only; they do not write files in imported scope.
 
 ---
 
@@ -276,7 +357,7 @@ Static searches performed (observed):
 
 - `pkill` — 9 matches, all catalogued above
 - `shell=True` — 3 matches, all catalogued above
-- `subprocess`, `os.system`, `Popen`, `HTTPServer`, `urllib`, `boto3`, `snapshot_download`, `mlx_lm.load`, `Path.home`, `expanduser`, `.mkdir`, `.write`
+- `subprocess`, `os.system`, `Popen`, `HTTPServer`, `urllib`, `boto3`, `snapshot_download`, `mlx_lm.load`, `Path.home`, `expanduser`, `.mkdir`, `.write`, `save_prompt_cache`, `savez`, `save_safetensors`, `unlink`, `rmtree`
 
 Cited files and line numbers exist in the worktree at commit under review. No Python module from imported scope was executed during this audit.
 
