@@ -27,11 +27,13 @@ different backend:
 
 ## 1. Top-level llama.cpp clients (`agent.py`, `chat.py`)
 
-Both top-level scripts are **HTTP clients**, not servers. They assume an
-external OpenAI-compatible server (`llama-server`) is already running and
-reachable at `SERVER = os.environ.get("LLAMA_URL", "http://localhost:8000")`
-(`agent.py:21`, `chat.py:24`). Neither file loads a model itself; they only
-issue `urllib.request` calls.
+Both top-level scripts use an OpenAI-compatible HTTP endpoint at
+`SERVER = os.environ.get("LLAMA_URL", "http://localhost:8000")`
+(`agent.py:21`, `chat.py:24`). `chat.py` is a pure client and requires an
+already-running server. `agent.py` is primarily a client, but it also owns an
+optional lifecycle path: `swap_model()` terminates matching `llama-server`
+processes, starts a replacement with `subprocess.Popen`, and polls `/health`
+(`agent.py:397-429`). Neither script loads model weights in-process.
 
 ### 1.1 Request / streaming behavior
 
