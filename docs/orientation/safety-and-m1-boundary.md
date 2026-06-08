@@ -132,7 +132,7 @@ Paths below are **literals or expanduser defaults** in source (observed). They a
 | `MODEL_DIR` | `/Users/bigneek/models/qwen3-30b-stream` | `engine_30b.py:11` |
 | `MLX_MODEL_DIR` / `OUTPUT_DIR` | `/Users/bigneek/models/qwen35-35b-mlx-4bit` → stream dir | `preprocess.py:7–8` |
 
-**Recommendation (inferred):** Milestone 1 artifact writer should use configurable, repo-relative or XDG paths—not these literals.
+**Recommendation (inferred):** Milestone 1 artifact writer must use the approved repo-relative layout (`benchmarks/runs/<timestamp>/`)—not prototype home-directory or machine-specific literals.
 
 ---
 
@@ -197,7 +197,7 @@ Importing these modules mutates the user's home directory without an explicit us
 - `agent.py:573–634` — picoclaw subprocess may perform network and shell tools internally.
 - `rich` / terminal UI — clears screen, no security boundary (`agent.py:753`, `chat.py:180`).
 
-**Recommendation (inferred):** Milestone 1 artifact writer must be model-independent: JSON/metadata writes only, no `mlx_lm`, `llama-server`, or outbound HTTP.
+**Recommendation (inferred):** Milestone 1 artifact writer must be model-independent: append-only schema-versioned events to `run.jsonl` plus a derived `summary.md`, with injectable clock/run ID for tests. No `mlx_lm`, `llama-server`, or outbound HTTP.
 
 ---
 
@@ -235,8 +235,23 @@ Source for scope: issue #3 implementation decisions and out-of-scope list (appro
 | Packaging | `pyproject.toml`, `src/mac_llm/` (or equivalent layout), package `__init__.py` | Installable `mac-llm` distribution without importing prototype roots |
 | Console entry point | `[project.scripts]` → stub CLI module (e.g. `mac_llm/cli.py` or `__main__.py`) | `--help`, version, placeholder subcommands only; **no** model or server startup |
 | Required docs | `docs/upstream/`, `docs/orientation/`, README updates tied to M1 | Provenance and orientation completed in M0; M1 adds only packaging/usage docs |
-| Benchmark artifact writer | e.g. `mac_llm/artifacts.py` + tests | Deterministic write of benchmark result JSON/schema under a configurable artifacts directory; **no** inference, subprocess, or network |
-| Tests | `tests/` for packaging, CLI `--help`, artifact writer | Prove install entry point and artifact schema without hardware |
+| Benchmark artifact writer | e.g. `mac_llm/artifacts.py` + tests | Model-independent writer that creates `benchmarks/runs/<timestamp>/run.jsonl` and `summary.md` per run; **no** inference, subprocess, or network |
+| Tests | `tests/` for packaging, CLI `--help`, artifact writer | Prove install entry point and artifact contract without hardware |
+
+#### Benchmark artifact writer contract (inferred from approved implementation plan)
+
+The artifact writer is the only Milestone 1 surface that performs filesystem writes beyond packaging metadata. Its contract is narrower than the prototype write sites inventoried above:
+
+| Requirement | Detail |
+|-------------|--------|
+| Output layout | Each run writes under `benchmarks/runs/<timestamp>/` with exactly two artifacts: `run.jsonl` (event log) and `summary.md` (human-readable rollup). |
+| Event log | `run.jsonl` is **append-only**. Each line is one schema-versioned JSON event. Events are never rewritten or truncated in place. |
+| Schema | Events carry an explicit schema version field so downstream readers can evolve without silent breakage. |
+| Summary | `summary.md` is derived from the completed `run.jsonl` for the same run directory. |
+| Determinism / testability | Run directory name (`<timestamp>`) and run ID must be **injectable** (clock and ID providers) so tests can assert exact paths and contents without wall-clock dependence or model hardware. |
+| Independence | Writer accepts structured in-memory events only. It does not load models, spawn subprocesses, open network connections, or import prototype modules. |
+
+**Observed contrast:** Prototype benchmarks (e.g. `mlx/benchmark.py`, `mlx/agent_benchmark.py`) print results to stdout and delete cache files; they do not emit schema-versioned run artifacts under a repo-relative tree.
 
 ### Explicitly excluded from Milestone 1 (from issue #3)
 
