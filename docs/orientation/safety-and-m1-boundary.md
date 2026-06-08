@@ -271,24 +271,32 @@ Importing these modules mutates the user's home directory without an explicit us
 | `research/expert-sniper/mlx-sniper/moe_agent_*.py`, `flash_moe.py`, etc. | Same pattern with research paths |
 | `cli-agent/.../download.py:120–121` | `huggingface_hub.snapshot_download` |
 
-### Hugging Face tokenizer loading with `trust_remote_code` (observed)
+### Hugging Face tokenizer loading and trusted code (observed)
 
-Several engines and research scripts call `AutoTokenizer.from_pretrained(..., trust_remote_code=True)`. On a Hugging Face cache miss this can perform **outbound downloads** and execute **repository-provided Python** from the model repo—not merely read a local `MODEL_DIR`.
+Several engines and research scripts call
+`AutoTokenizer.from_pretrained(..., trust_remote_code=True)`. Calls using an
+explicit Hugging Face repository ID can perform **outbound downloads** on a
+cache miss and execute **repository-provided Python**. Calls using a local
+model directory do not inherently download missing files, but
+`trust_remote_code=True` can still execute custom tokenizer code shipped in
+that local model tree.
 
 | Location | Model ID / path | Notes |
 |----------|-----------------|-------|
 | `cli-agent/.../engine.py:115` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
 | `cli-agent/.../engine_next.py:118` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
-| `cli-agent/.../engine_30b.py:109` | `MODEL_DIR` (local path) | `trust_remote_code=True` — may still pull remote tokenizer assets if cache incomplete |
-| `cli-agent/.../engine_gemma4.py:176,178–179` | `MODEL_DIR` or `google/gemma-4-26B-A4B-it` | `trust_remote_code=True` on HF ID fallback |
+| `cli-agent/.../engine_30b.py:109` | `MODEL_DIR` (local path) | `trust_remote_code=True` — local custom code execution risk |
+| `cli-agent/.../engine_gemma4.py:176,178–179` | `MODEL_DIR` or `google/gemma-4-26B-A4B-it` | Local trusted-code risk; HF fallback adds download + remote-code risk |
 | `mlx-sniper/moe_agent_35b.py:115` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
-| `mlx-sniper/moe_agent_30b.py:107` | `MODEL_DIR` | `trust_remote_code=True` |
-| `mlx-sniper/moe_agent_macbook.py:151` | `MODEL_DIR` | `trust_remote_code=True` |
-| `mlx-sniper/moe_agent_gemma4.py:179` | `self.model_dir` | No explicit `trust_remote_code` flag (defaults false) |
+| `mlx-sniper/moe_agent_30b.py:107` | `MODEL_DIR` (local path) | `trust_remote_code=True` — local custom code execution risk |
+| `mlx-sniper/moe_agent_macbook.py:151` | `MODEL_DIR` (local path) | `trust_remote_code=True` — local custom code execution risk |
+| `mlx-sniper/moe_agent_gemma4.py:179` | `self.model_dir` | No `trust_remote_code`; may download tokenizer assets only if given a remote ID |
 | `mlx-sniper/flash_moe.py:233` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
 | `mlx-sniper/batched_moe.py:313` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
 
-**Risk:** High. Combines network I/O with execution of third-party code paths bundled in model repositories.
+**Risk:** High for explicit repository IDs with `trust_remote_code=True`
+because they combine network I/O with third-party code execution. Local
+trusted-code paths remain a code-execution risk without requiring network I/O.
 
 **Recommendation (inferred):** Milestone 1 must not call `from_pretrained` with `trust_remote_code=True` or depend on Hugging Face cache side effects.
 
