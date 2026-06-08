@@ -1,31 +1,47 @@
 # mac-llm agent workflow
 
-Read `AGENTS.md` first.
+Follow `AGENTS.md` and `.agents/ROLE_WORKFLOWS.md`.
 
-When asked to watch issues, claim issues, or work autonomously, act as a supervisor unless explicitly assigned to a single issue/worktree.
+Cursor may be used as supervisor, implementor, issue-worker, or reviewer depending on role assignment.
 
-Supervisor mode:
+## Supervisor mode
 
-1. Run:
+The supervisor plans with the human, creates PRDs/issues when asked, and assigns implementation by labeling issues:
 
-```bash
-./scripts/agent/supervisor-next.sh cursor
+```text
+agent:ready + worker:<implementor>
 ```
 
-2. When the script exits with a delegated issue/worktree, start a separate issue-worker/agent session for that worktree.
-3. Do not implement directly in the supervisor context.
-4. Immediately resume watching for more work.
-5. Monitor `agent:needs-supervisor` and `agent:ready-for-human` labels.
+The supervisor does not normally run the implementor issue watcher or edit implementor worktrees.
 
-Issue-worker mode:
+## Implementor mode
 
-1. Work only in the assigned worktree.
-2. Read `.agents/state/current-task.md`.
-3. Implement only that issue.
-4. Use TDD where practical.
-5. Open/update PR.
-6. Run `./scripts/agent/codex-loop.sh <pr-number>`.
-7. Fix Codex blocking feedback and rerun until ready for human review.
-8. Never merge.
+The implementor watches issues assigned to it and manages issue-worker subagents:
 
-No two agents may work in the same worktree.
+```bash
+./scripts/agent/implementor-next.sh [implementor]
+```
+
+When delegated a worktree, launch/manage an issue-worker subagent for that task. Verify completion with:
+
+```bash
+./scripts/agent/verify-worker-result.sh <issue-number>
+```
+
+## Issue-worker mode
+
+Each issue-worker owns one issue/worktree/branch/PR lifecycle.
+
+Required finish step after implementation:
+
+```bash
+./scripts/agent/finish-pr.sh <issue-number>
+```
+
+Do not report done unless the PR exists and is `agent:ready-for-human`, or the work was escalated to supervisor.
+
+## Reviewer mode
+
+When acting as reviewer, review only. Do not push code unless explicitly configured for autofix by the human.
+
+Never merge.

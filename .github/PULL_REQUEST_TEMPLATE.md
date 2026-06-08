@@ -30,5 +30,5 @@ N/A
 - [ ] TDD used where practical
 - [ ] Relevant tests/commands run
 - [ ] Benchmark/artifact written if relevant
-- [ ] Codex review requested/completed
+- [ ] review requested/completed
 - [ ] No automatic merge
