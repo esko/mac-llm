@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 from mac_llm import __version__
+from mac_llm.bench.artifacts import BenchmarkArtifactWriter
+from mac_llm.bench.kv import run_kv_benchmark_cli
 from mac_llm.bench.swap import run_swap_benchmark
 from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager, render_start_command
 from mac_llm.roles.select import UnknownRoleError, select_target
@@ -146,6 +148,26 @@ def _cmd_bench_swap(from_target_id: str, to_target_id: str) -> int:
     return 1
 
 
+def _cmd_bench_kv(target_id: str, prefix_name: str) -> int:
+    root = Path.cwd()
+    writer = BenchmarkArtifactWriter(root)
+    result = run_kv_benchmark_cli(
+        target_id=target_id,
+        prefix_name=prefix_name,
+        root=root,
+        writer=writer,
+    )
+    if result.status == "ok":
+        assert result.record is not None
+        print(f"kv benchmark complete: cache_helped={result.record.cache_helped}")
+        print(f"artifact: {writer.run_dir}")
+        return 0
+
+    print(result.message or "kv benchmark failed", file=sys.stderr)
+    print(f"artifact: {writer.run_dir}", file=sys.stderr)
+    return 1
+
+
 def _cmd_runtime_orphan_check(target_id: str) -> int:
     try:
         target = get_target(target_id)
@@ -261,6 +283,21 @@ def main(argv: list[str] | None = None) -> None:
     bench_parser = subparsers.add_parser("bench", help="Benchmark commands")
     bench_subparsers = bench_parser.add_subparsers(dest="bench_command")
 
+    kv_parser = bench_subparsers.add_parser(
+        "kv",
+        help="Compare cold vs warm/restored prompt-cache performance",
+    )
+    kv_parser.add_argument(
+        "--target",
+        required=True,
+        help="Runtime target id (e.g. local_deep_moe)",
+    )
+    kv_parser.add_argument(
+        "--prefix",
+        required=True,
+        help="Built-in prefix prompt name (e.g. repo-review)",
+    )
+
     swap_parser = bench_subparsers.add_parser(
         "swap",
         help="Run a fast→fast swap benchmark with artifact output",
@@ -301,6 +338,8 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_runtime_smoke(args.target_id, args.artifact_root))
 
     if args.command == "bench":
+        if args.bench_command == "kv":
+            raise SystemExit(_cmd_bench_kv(args.target, args.prefix))
         if args.bench_command == "swap":
             raise SystemExit(_cmd_bench_swap(args.from_target, args.to_target))
 
