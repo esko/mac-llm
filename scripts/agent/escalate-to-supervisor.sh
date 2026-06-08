@@ -53,7 +53,7 @@ The issue-worker is giving up and must stop touching this PR/worktree.
    - label PR \`agent:supervisor-taking-over\`
    - work only on this PR branch/worktree
    - fix the issue
-   - rerun Codex loop
+   - rerun review loop
    - never merge automatically
 EOF
 
@@ -61,7 +61,8 @@ gh pr edit "$pr" \
   --add-label "agent:needs-supervisor" \
   --add-label "agent:takeover-requested" || true
 
-gh pr comment "$pr" --body "$(cat <<EOF
+comment_file=".agents/state/supervisor-escalation-pr-${pr}-comment.md"
+cat > "$comment_file" <<EOF
 Agent escalation: supervisor needed.
 
 Reason:
@@ -70,11 +71,12 @@ $reason
 The issue-worker is stopping and should not continue editing this PR branch.
 
 Supervisor should inspect:
-\`$summary_file\`
+$summary_file
 
 Human merge is still required.
 EOF
-)" || true
+
+gh pr comment "$pr" --body-file "$comment_file" || true
 
 cat <<EOF
 Escalated PR #$pr to supervisor.

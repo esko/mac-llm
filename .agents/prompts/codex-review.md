@@ -1,22 +1,15 @@
-# Codex review prompt
+# Codex reviewer prompt
 
-Use this for Codex PR review requests.
+Compatibility prompt for Codex-specific review requests.
 
-Review against:
+Prefer the generic reviewer system:
 
-- `AGENTS.md`
-- the linked GitHub issue acceptance criteria
-- the current milestone scope
-- the mac-llm implementation plan
+```bash
+AGENT_REVIEWER=codex ./scripts/agent/review-loop.sh <pr-number>
+```
 
-Focus on:
+Reviewer request templates live under:
 
-- P0/P1 correctness issues
-- missing or weak tests
-- unsafe shell/file behavior
-- milestone leakage
-- unnecessary refactors
-- benchmark/artifact correctness where relevant
-- failure clarity
-
-Do not nitpick style unless it affects correctness, maintainability, or future milestone safety.
+```text
+.agents/reviewers/
+```

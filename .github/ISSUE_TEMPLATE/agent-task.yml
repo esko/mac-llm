@@ -1,5 +1,5 @@
 name: Agent task
-description: Small implementation task for an agent worker
+description: Small implementation task for an implementor harness
 title: "[Agent] "
 labels:
   - agent:draft
@@ -52,14 +52,12 @@ body:
     validations:
       required: true
 
-  - type: dropdown
+  - type: input
     id: worker
     attributes:
-      label: Recommended worker
-      options:
-        - claude
-        - cursor
-        - codex
+      label: Recommended implementor
+      description: Implementor id for the worker label, e.g. claude, cursor, or any.
+      placeholder: any
     validations:
       required: true
 
@@ -89,14 +87,14 @@ body:
     id: stop
     attributes:
       label: Stop condition
-      description: Usually “open PR, complete Codex loop, mark ready for human.”
+      description: Usually “open PR, complete review loop, mark ready for human.”
     validations:
       required: true
 
   - type: textarea
-    id: codex_focus
+    id: review_focus
     attributes:
-      label: Codex review focus
-      description: What Codex should pay special attention to.
+      label: Review focus
+      description: What the configured reviewer should pay special attention to.
     validations:
       required: false

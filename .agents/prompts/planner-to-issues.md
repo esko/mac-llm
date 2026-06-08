@@ -16,8 +16,11 @@ Issue rules:
 - Default label: `agent:draft`.
 - Add `agent:ready` only if the human explicitly wants implementation to launch.
 - Add exactly one worker label:
-  - `worker:claude` for non-trivial implementation/debugging
-  - `worker:cursor` for small bounded cleanup/tests/docs
+  - `worker:claude` for Claude-targeted implementation/debugging
+  - `worker:cursor` for Cursor-targeted bounded cleanup/tests/docs
+  - `worker:any` when any available implementor may claim the issue
+
+The reviewer is not selected by the issue implementor label. Reviewer selection is controlled separately with `AGENT_REVIEWER`.
 - Do not create future milestone issues unless explicitly asked.
 - Do not implement.
 
@@ -38,5 +41,5 @@ Each issue body should include:
 
 ## Stop condition
 
-## Codex review focus
+## Review focus
 ```
