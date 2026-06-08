@@ -73,6 +73,11 @@ def _targets() -> dict[str, RuntimeTarget]:
     }
 
 
+def list_target_ids() -> tuple[str, ...]:
+    """Return configured runtime target ids in stable order."""
+    return tuple(sorted(_targets()))
+
+
 def get_target(target_id: str) -> RuntimeTarget:
     """Return a configured runtime target or fail closed."""
     targets = _targets()
