@@ -118,11 +118,20 @@ Model registry maps `9b`/`35b` to `mlx-community/...` repos
 Server surface (`APIHandler`, `mlx/mlx_engine.py:167`):
 
 - `POST /v1/chat/completions` (`_handle_chat`, `mlx/mlx_engine.py:246`) returns
-  the same `choices/usage/timings` shape the section-1 clients expect
-  (`mlx/mlx_engine.py:257-272`), so `agent.py`/`chat.py` can point at it
-  unchanged. Prompt formatting is a hand-built Qwen chat template that injects
-  an empty `<think>` block to skip reasoning (`format_chat()`,
-  `mlx/mlx_engine.py:92-107`).
+  the same `choices/usage/timings` body shape the section-1 clients expect
+  (`mlx/mlx_engine.py:257-272`). **It is not streaming-compatible, however**:
+  `_handle_chat` ignores the request's `stream` flag and always calls the
+  blocking `generate()` (`mlx/mlx_engine.py:255`; `generate()` never emits SSE
+  — `mlx/mlx_engine.py:55`, `:63-89`), returning one JSON body. A client
+  requesting `"stream": true` (which both section-1 clients do by default,
+  `chat.py:63`, `agent.py:531`) therefore gets a single non-SSE response with
+  no `data:` frames. `chat.py` tolerates this — its `stream()` parses nothing,
+  then `main()` falls back to non-streaming `ask()` after wasting the first
+  generation (`chat.py:258-274`) — but `agent.py`'s streaming paths
+  (`stream_llm()`, `agent.py:525`, consumed at `agent.py:1284`, `:1311`) have
+  no such fallback and would render an empty response against the MLX server.
+  Prompt formatting is a hand-built Qwen chat template that injects an empty
+  `<think>` block to skip reasoning (`format_chat()`, `mlx/mlx_engine.py:92-107`).
 - `GET /health` and `GET /props` (`mlx/mlx_engine.py:189-195`) mimic
   llama.cpp's discovery endpoints used by `detect_model()`.
 - KV-cache HTTP endpoints `/v1/context/{save,load,upload,download,list}`
@@ -347,8 +356,19 @@ reproduced here.
   (`:152-209`); the final table sums per-backend task time and picks a winner
   (`:217-236`). It imports `PagedInference` (`:139`) but does not invoke it.
 
-Both `mlx/` benchmarks are wall-clock + server-`timings` harnesses; neither
-writes a persisted artifact file — results are printed to stdout only.
+Both `mlx/` benchmarks are wall-clock + server-`timings` harnesses; the
+result tables are printed to stdout (no structured results file is written).
+They do, however, leave **KV-cache artifacts on disk under
+`~/.mac-code/kv-cache`** as a side effect of the persistence phase:
+`mlx/benchmark.py` writes `bench-turbo*` (`mlx/benchmark.py:171`) and
+`bench-uncompressed.safetensors` (`:178`), and `mlx/agent_benchmark.py` writes
+`agent-bench-turbo*` (`mlx/agent_benchmark.py:176`) and
+`agent-bench-unc.safetensors` (`:161`). The TurboQuant (`*-turbo*`) files are
+never deleted, and the uncompressed `*.safetensors` files are unlinked only
+inside the `if is_configured()` R2 branch (`mlx/benchmark.py:195-196`,
+`mlx/agent_benchmark.py:188-189`) — so when R2 is not configured they persist
+too. These can be large (full-prompt KV state), which matters when judging
+whether a benchmark is safe to run.
 
 ### 4.2 Expert-streaming micro-benchmarks (`mlx-sniper/`)
 
