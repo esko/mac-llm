@@ -51,6 +51,25 @@ def _targets() -> dict[str, RuntimeTarget]:
             stop_timeout=30,
             model_config_ref="models.local_fast",
         ),
+        "local_deep_moe": RuntimeTarget(
+            target_id="local_deep_moe",
+            runtime_type="mlx_sniper",
+            command=(
+                "mlx-sniper",
+                "serve",
+                "${MAC_LLM_MODEL_LOCAL_DEEP_MOE}",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8081",
+            ),
+            port=8081,
+            health_url="http://127.0.0.1:8081/api/tags",
+            log_path=data_root / "logs" / "local_deep_moe.log",
+            state_path=data_root / "state" / "local_deep_moe.json",
+            stop_timeout=60,
+            model_config_ref="models.local_deep_moe",
+        ),
     }
 
 
