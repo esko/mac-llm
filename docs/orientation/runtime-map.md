@@ -169,12 +169,15 @@ tensors it returns during generation.
 
 ### 2.3 Cache experiments (not wired into generation)
 
-These match `mlx/PROJECT.md`'s "Experiments (not production-ready)" list and
-are **not imported by any serving path**. Cross-reference:
+These match `mlx/PROJECT.md`'s "Experiments (not production-ready)" list. None
+of them are wired into the **generation/decode path** (section 2.1), but that
+is narrower than "unused": `mlx/r2_store.py` **is** reachable from the MLX
+server's HTTP surface — see its bullet below. Cross-reference:
 `git grep` for `PagedInference`, `TieredKVCache`, and `turboquant` finds
 references only in the experiments themselves, the benchmarks (`mlx/benchmark.py`,
 `mlx/agent_benchmark.py`), and `mlx/PROJECT.md` — never in `mlx/mlx_engine.py`,
-`agent.py`, or `chat.py`.
+`agent.py`, or `chat.py`. `r2_store` is the exception: it is imported by the
+server's context endpoints (`mlx/mlx_engine.py:227`, `:236`, `:241`).
 
 - `mlx/turboquant.py` — KV-cache compression (PolarQuant + group quantization
   at 2/3/4-bit). Entry symbols `compress_kv_cache()` (`mlx/turboquant.py:118`),
@@ -199,12 +202,23 @@ references only in the experiments themselves, the benchmarks (`mlx/benchmark.py
   `get_r2_client()` (`mlx/r2_store.py:40`), `is_configured()` (`:65`),
   `upload_context`/`download_context` (`:109`, `:161`), `share_context()`
   presigned URLs (`:260`). Requires R2 credentials; `mlx/PROJECT.md:17` marks
-  it "Not tested in production". Guarded everywhere by `is_configured()` so
-  unconfigured runs skip the cloud path.
+  it "Not tested in production". **This is a live external side-effect path on
+  the MLX server**: the handlers `_handle_upload_context` /
+  `_handle_download_context` / `_handle_list_contexts`
+  (`mlx/mlx_engine.py:222-244`, reachable via `POST /v1/context/upload`,
+  `POST /v1/context/download`, `GET /v1/context/list`) dynamically import
+  `r2_store` and call `upload_context`/`download_context`/`list_remote_contexts`,
+  which perform local gzip compression and S3-style network I/O when
+  credentials exist. The cloud calls are guarded by `is_configured()`
+  (e.g. `mlx/mlx_engine.py:243`), so unconfigured runs skip the network step,
+  but the endpoints themselves are unauthenticated server routes.
 
-Net: the only cache code on a real generation path is the (non-functional)
-hook in `mlx_engine.py`; every other cache module is exercised only through
-benchmarks or not at all.
+Net: no cache module participates in the generation/decode loop (the only hook
+there is the non-functional `set_kv_cache` call, section 2.1). The reach of the
+rest varies: `r2_store` is exposed through the server's `/v1/context/*`
+endpoints (compression + optional network I/O); `turboquant` runs only inside
+the section-4 benchmarks; `paged_inference` is imported but unused; and
+`tiered_cache` is imported by nothing.
 
 ---
 
@@ -406,9 +420,12 @@ These target the SSD/fallback I/O path rather than end-to-end chat:
   consumes a saved cache; the server `--load-context` path calls an undefined
   `set_kv_cache` (`mlx/mlx_engine.py:314`) and `generate()` passes no cache
   (`mlx/mlx_engine.py:63-66`).
-- **Cache experiments are largely unreferenced.** `TieredKVCache` is imported by
-  nothing; `PagedInference` is imported but unused; TurboQuant/R2 run only
-  inside benchmarks and behind `is_configured()` guards.
+- **Cache experiments vary in reach.** `TieredKVCache` is imported by nothing;
+  `PagedInference` is imported but unused; `turboquant` runs only inside the
+  benchmarks. `r2_store` is the exception — it is reachable from the MLX
+  server's `/v1/context/{upload,download,list}` endpoints
+  (`mlx/mlx_engine.py:222-244`), giving the server a live local-compression +
+  optional-network side-effect path (cloud calls gated by `is_configured()`).
 - **Hard-coded local assumptions.** Bare-name imports that assume a CWD
   (`mlx/mlx_engine.py:311`, `mlx/benchmark.py:145-146`), absolute home paths
   (`agent.py:65`, `mlx/agent_benchmark.py:47`), and an absolute upstream
