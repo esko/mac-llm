@@ -93,9 +93,12 @@ HTTP endpoint. The control flow in agent mode (`agent.py` `main()`,
   `~/.mac-code/logs` via `log_interaction()` (`agent.py:27`), summarized by
   `get_failure_stats()` (`agent.py:43`) behind `/improve`.
 
-Key interface fact: everything in `agent.py`/`chat.py` is wire-compatible with
-the OpenAI chat-completions shape, which is exactly what the MLX server
-(section 2) and—via a different API—the sniper server (section 3) emulate.
+Key interface fact: the `agent.py`/`chat.py` request *bodies* use the OpenAI
+chat-completions shape, which the MLX server (section 2) and—via a different
+API—the sniper server (section 3) also speak. Compatibility is only partial,
+though: it holds for **non-streaming** requests, but the MLX server does not
+implement SSE streaming, so `agent.py`'s default streaming paths render empty
+against it (`chat.py` survives via its non-streaming fallback). See section 2.1.
 
 ---
 
