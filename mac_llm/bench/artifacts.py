@@ -6,7 +6,10 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mac_llm.artifacts.schemas import StructuredArtifact
 
 SCHEMA_VERSION = 1
 
@@ -71,6 +74,16 @@ class BenchmarkArtifactWriter:
         with self._jsonl_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True) + "\n")
 
+    def append_structured_artifact(self, artifact: StructuredArtifact) -> None:
+        """Log a structured artifact into the run/session record."""
+        self.append(
+            RunRecord(
+                event=f"artifact.{artifact.artifact_type}",
+                status="ok",
+                metadata={"artifact": artifact.to_dict()},
+            )
+        )
+
     def write_summary(self) -> Path:
         self.ensure_run_dir()
         rel_dir = self._run_dir.relative_to(self._root)
@@ -90,6 +103,17 @@ class BenchmarkArtifactWriter:
             message = event.get("message")
             if message:
                 line += f": {message}"
+            metadata = event.get("metadata") or {}
+            artifact = metadata.get("artifact")
+            if isinstance(artifact, dict):
+                tool = artifact.get("tool")
+                summary_text = artifact.get("summary") or artifact.get("goal")
+                if tool and summary_text:
+                    line += f": {tool}: {summary_text}"
+                elif tool:
+                    line += f": {tool}"
+                elif summary_text:
+                    line += f": {summary_text}"
             lines.append(line)
 
         self._summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
