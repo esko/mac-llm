@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from mac_llm import __version__
+from mac_llm.roles.ask import AskError, run_ask
+from mac_llm.roles.config import ASK_CLI_ROLES
+from mac_llm.roles.select import UnknownRoleError
 from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager, render_start_command
 from mac_llm.runtime.target import UnknownTargetError, get_target
 
@@ -107,6 +111,29 @@ def _cmd_runtime_health(target_id: str) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_ask(role: str, prompt: str) -> int:
+    try:
+        result = run_ask(role, prompt, root=Path.cwd())
+    except UnknownRoleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AskError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if not result.success:
+        print(result.error or "ask failed", file=sys.stderr)
+        print(f"artifact: {result.artifact_path}", file=sys.stderr)
+        return 1
+
+    if result.response_text is not None:
+        sys.stdout.write(result.response_text)
+        if not result.response_text.endswith("\n"):
+            sys.stdout.write("\n")
+    print(f"artifact: {result.artifact_path}", file=sys.stderr)
+    return 0
+
+
 def _cmd_runtime_orphan_check(target_id: str) -> int:
     try:
         target = get_target(target_id)
@@ -179,7 +206,22 @@ def main(argv: list[str] | None = None) -> None:
     )
     orphan_parser.add_argument("target_id", help="Runtime target id")
 
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="Run a prompt with manual role selection (no automatic router)",
+    )
+    ask_parser.add_argument(
+        "--role",
+        required=True,
+        choices=sorted(ASK_CLI_ROLES),
+        help="Agent role for target selection",
+    )
+    ask_parser.add_argument("prompt", help="Prompt text")
+
     args = parser.parse_args(argv)
+
+    if args.command == "ask":
+        raise SystemExit(_cmd_ask(args.role, args.prompt))
 
     if args.command == "runtime":
         if args.runtime_command == "render":
