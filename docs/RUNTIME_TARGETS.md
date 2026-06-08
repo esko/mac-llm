@@ -51,3 +51,46 @@ A candidate becomes a configured target only after:
 4. Expected resident memory fits the band rules in `docs/24GB_PROFILE_POLICY.md`
 
 Full milestone sequence and role mapping live in `PROJECT.md`.
+
+## Manual runtime lifecycle
+
+Use the managed lifecycle commands after confirming the target command is available on the host and required environment variables are set.
+
+Dry-run the rendered command first:
+
+```bash
+mac-llm runtime render local_fast
+```
+
+Start the managed runtime:
+
+```bash
+export MAC_LLM_MODEL_LOCAL_FAST=/path/to/model.gguf
+mac-llm runtime start local_fast
+```
+
+Check persisted state:
+
+```bash
+mac-llm runtime status local_fast
+```
+
+Probe health:
+
+```bash
+mac-llm runtime health local_fast
+```
+
+Check for leftover processes or stale state:
+
+```bash
+mac-llm runtime orphan-check local_fast
+```
+
+Stop the managed runtime (targeted PID only; no `pkill`):
+
+```bash
+mac-llm runtime stop local_fast
+```
+
+State is written under the target `state_path` from the render output (for `local_fast`, `~/.mac-llm/state/local_fast.json`). Logs append to the target `log_path`.

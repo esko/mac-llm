@@ -1,1 +1,1 @@
-"""Runtime target configuration and dry-run rendering."""
+"""Runtime target configuration, lifecycle management, and dry-run rendering."""
