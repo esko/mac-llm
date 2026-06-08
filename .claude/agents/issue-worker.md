@@ -21,7 +21,7 @@ Workflow:
 1. Work only in the assigned worktree.
 2. Restate the issue acceptance criteria.
 3. Identify the smallest testable change.
-4. Use TDD where practical.
+4. Use the `/tdd` skill (red-green-refactor): write or extend tests first, watch them fail, then implement. (Pure-docs issues are exempt.)
 5. Implement only the claimed issue.
 6. Do not pull in future milestone work.
 7. Run relevant tests.

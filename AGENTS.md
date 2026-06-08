@@ -31,7 +31,7 @@ Do not confuse implementor with issue-worker. The implementor manages issue-work
 * Work from a GitHub issue.
 * Use one dedicated worktree per issue/PR.
 * Keep changes atomic: one concern per branch/PR.
-* Use TDD: write or update tests before implementation when practical.
+* Use TDD via the `/tdd` skill (red-green-refactor): write or update tests before implementation, watch them fail, then make them pass. Implementors must instruct their issue-worker subagents to use the `/tdd` skill.
 * Use concise PRDs for non-trivial behavior changes.
 * Use available Matt Pocock/TDD skills when helpful.
 * Push branches and open/update PRs automatically.

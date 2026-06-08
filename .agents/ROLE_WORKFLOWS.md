@@ -69,7 +69,7 @@ Implementor loop:
 Use the implementor identity as `[implementor]`, or omit it when `AGENT_IMPLEMENTOR` is set in `.agents/agent.env`. `AGENT_IMPLEMENTER` is accepted as a legacy alias.
 
 2. The script blocks cheaply using `gh` until a matching issue is available, implementor attention is needed, or supervisor attention is needed.
-3. When it exits with a delegated issue/worktree, launch an issue-worker subagent for that worktree/task file.
+3. When it exits with a delegated issue/worktree, launch an issue-worker subagent for that worktree/task file, and instruct it to use the `/tdd` skill (red-green-refactor) for implementation.
 4. The implementor must not edit the issue-worker worktree directly unless taking over within its own harness after the worker has stopped.
 5. After launching the issue-worker, immediately run `implementor-next.sh` again when concurrency allows.
 6. When an issue-worker reports done, run:
@@ -100,7 +100,7 @@ Required issue-worker lifecycle:
 4. Read the linked GitHub issue.
 5. Restate the acceptance criteria.
 6. Identify the smallest testable change.
-7. Use TDD where practical.
+7. Use the `/tdd` skill (red-green-refactor): write/extend tests first, watch them fail, then implement. (Pure-docs issues are exempt.)
 8. Implement only that issue.
 9. Do not pull in future milestone work.
 10. Run relevant tests.

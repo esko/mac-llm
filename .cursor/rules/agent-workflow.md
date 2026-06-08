@@ -22,7 +22,7 @@ The implementor watches issues assigned to it and manages issue-worker subagents
 ./scripts/agent/implementor-next.sh [implementor]
 ```
 
-When delegated a worktree, launch/manage an issue-worker subagent for that task. Verify completion with:
+When delegated a worktree, launch/manage an issue-worker subagent for that task, and instruct it to use the `/tdd` skill (red-green-refactor) for implementation. Verify completion with:
 
 ```bash
 ./scripts/agent/verify-worker-result.sh <issue-number>
@@ -31,6 +31,8 @@ When delegated a worktree, launch/manage an issue-worker subagent for that task.
 ## Issue-worker mode
 
 Each issue-worker owns one issue/worktree/branch/PR lifecycle.
+
+Use the `/tdd` skill (red-green-refactor) for implementation: write/extend tests first, watch them fail, then implement. (Pure-docs issues are exempt.)
 
 Required finish step after implementation:
 
