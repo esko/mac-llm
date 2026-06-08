@@ -218,8 +218,12 @@ Importing these modules mutates the user's home directory without an explicit us
 
 | Location | API / operation | Target path | Risk |
 |----------|-----------------|-------------|------|
-| `mlx/benchmark.py:196` | `Path.unlink` | Deletes cache file under `~/.mac-code/kv-cache` during benchmark | Medium |
-| `mlx/agent_benchmark.py:189` | `f.unlink` | Same cache cleanup pattern | Medium |
+| `mlx/benchmark.py:171` | `serialize_compressed(...)` (via `turboquant`) | `~/.mac-code/kv-cache/bench-turbo*` (compressed KV + `.meta.json`) | Medium |
+| `mlx/benchmark.py:180` | `save_prompt_cache(...)` | `~/.mac-code/kv-cache/bench-uncompressed.safetensors` | Medium |
+| `mlx/benchmark.py:196` | `Path.unlink` | Deletes `bench-uncompressed*` under `~/.mac-code/kv-cache` before R2 re-download test | Medium |
+| `mlx/agent_benchmark.py:163` | `save_prompt_cache(...)` | `~/.mac-code/kv-cache/agent-bench-unc.safetensors` | Medium |
+| `mlx/agent_benchmark.py:176` | `serialize_compressed(...)` | `~/.mac-code/kv-cache/agent-bench-turbo*` | Medium |
+| `mlx/agent_benchmark.py:189` | `f.unlink` | Deletes `agent-bench-unc*` before R2 re-download test | Medium |
 
 #### `research/expert-sniper/mlx-sniper/` (standalone scripts)
 
@@ -242,7 +246,7 @@ Importing these modules mutates the user's home directory without an explicit us
 | `download.py:224–239,281–296,304,342,349` | `open`/`mx.save_safetensors`/`json.dump`/`shutil.copy` | Downloaded model tree + split shards under `output_dir` | High (network + disk) |
 | `calibrate.py:392–395` | `open(..., "w")` + `json.dump`; `np.savez_compressed` | `<model_dir>/sniper_config.json`, `sniper_calibration.npz` | Medium |
 
-**Observed:** MoE agent scripts (`moe_agent_*.py`) read `config.json` only; they do not write files in imported scope.
+**Observed:** MoE agent scripts (`moe_agent_*.py`) do not write files in imported scope; they read `config.json` and load tokenizers (see section 6 tokenizer table).
 
 ---
 
@@ -266,6 +270,27 @@ Importing these modules mutates the user's home directory without an explicit us
 | `research/expert-sniper/cli-agent/.../engine*.py`, `generate.py`, `server.py` | Custom MoE engines; `engine.load()` reads hardcoded `MODEL_DIR` |
 | `research/expert-sniper/mlx-sniper/moe_agent_*.py`, `flash_moe.py`, etc. | Same pattern with research paths |
 | `cli-agent/.../download.py:120–121` | `huggingface_hub.snapshot_download` |
+
+### Hugging Face tokenizer loading with `trust_remote_code` (observed)
+
+Several engines and research scripts call `AutoTokenizer.from_pretrained(..., trust_remote_code=True)`. On a Hugging Face cache miss this can perform **outbound downloads** and execute **repository-provided Python** from the model repo—not merely read a local `MODEL_DIR`.
+
+| Location | Model ID / path | Notes |
+|----------|-----------------|-------|
+| `cli-agent/.../engine.py:115` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
+| `cli-agent/.../engine_next.py:118` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
+| `cli-agent/.../engine_30b.py:109` | `MODEL_DIR` (local path) | `trust_remote_code=True` — may still pull remote tokenizer assets if cache incomplete |
+| `cli-agent/.../engine_gemma4.py:176,178–179` | `MODEL_DIR` or `google/gemma-4-26B-A4B-it` | `trust_remote_code=True` on HF ID fallback |
+| `mlx-sniper/moe_agent_35b.py:115` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
+| `mlx-sniper/moe_agent_30b.py:107` | `MODEL_DIR` | `trust_remote_code=True` |
+| `mlx-sniper/moe_agent_macbook.py:151` | `MODEL_DIR` | `trust_remote_code=True` |
+| `mlx-sniper/moe_agent_gemma4.py:179` | `self.model_dir` | No explicit `trust_remote_code` flag (defaults false) |
+| `mlx-sniper/flash_moe.py:233` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
+| `mlx-sniper/batched_moe.py:313` | `Qwen/Qwen3.5-35B-A3B` | `trust_remote_code=True` |
+
+**Risk:** High. Combines network I/O with execution of third-party code paths bundled in model repositories.
+
+**Recommendation (inferred):** Milestone 1 must not call `from_pretrained` with `trust_remote_code=True` or depend on Hugging Face cache side effects.
 
 ### HTTP servers (observed)
 
