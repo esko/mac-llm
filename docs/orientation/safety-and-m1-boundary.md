@@ -77,7 +77,7 @@ Every `shell=True` occurrence in imported scope:
 | `mlx/benchmark.py:73–76` | `subprocess.Popen([sys.executable, "mlx_engine.py", ...], cwd=~/Desktop/mac-code-mlx)` | `start_mlx_9b()` | Starts MLX HTTP engine from **external** directory not in this repo. | High |
 | `mlx/agent_benchmark.py:26–33` | `subprocess.Popen` | `start_llama_9b()` | Same llama-server launch pattern. | High |
 | `mlx/agent_benchmark.py:40–43` | `subprocess.Popen` | `start_mlx_9b()` | Same MLX launch from `~/Desktop/mac-code-mlx`. | High |
-| `mlx/agent_benchmark.py:47–48` | `sys.path.insert` + `from agent import ...` | Module import at script run | Pulls in `agent.py` side effects (logging dir creation, tool functions) when benchmark script runs. | High |
+| `mlx/agent_benchmark.py:47–48` | `sys.path.insert(0, ~/Desktop/pico-mini)` then `from agent import ...` | Module import at script run | **Observed:** `pico-mini` is prepended to `sys.path` before import. Python resolves `agent` from the first matching `agent.py` on that path—typically `~/Desktop/pico-mini/agent.py`, **not** the pinned top-level `agent.py` in this repo. Running the benchmark therefore executes unpinned, machine-local code whose provenance is outside the imported scope audited here. Any side effects (logging dir creation, shell/network tools) belong to whichever external module is found, not necessarily the repo's `agent.py`. | Critical |
 | `research/expert-sniper/mlx-sniper/flash_moe.py:309` | `subprocess.run(["sudo", "purge"], ...)` | Memory purge before bench | Requires elevated privileges; fails or prompts on non-macOS / locked-down systems. | High |
 | `research/expert-sniper/mlx-sniper/benchmark_fallback.py:123` | `os.system("sudo purge 2>/dev/null")` | Bench setup | Same sudo purge pattern via shell. | High |
 | `research/expert-sniper/mlx-sniper/bench_quick.py:96` | `os.system("sudo purge 2>/dev/null")` | Bench setup | Same. | High |
@@ -112,7 +112,7 @@ Paths below are **literals or expanduser defaults** in source (observed). They a
 | `CACHE_DIR` / cache roots | `~/.mac-code/kv-cache` (+ `blocks/`, `paged/` subdirs) | `mlx/kv_cache.py:14`, `mlx/tiered_cache.py:33`, `mlx/paged_inference.py:32`, `mlx/r2_store.py:36` |
 | `CONFIG_PATH` | `~/.mac-code/r2-config.json` | `mlx/r2_store.py:35` |
 | Benchmark cwd | `~/Desktop/mac-code-mlx` | `mlx/benchmark.py:76`, `mlx/agent_benchmark.py:43` |
-| Extra sys.path | `~/Desktop/pico-mini` | `mlx/agent_benchmark.py:47` |
+| Extra sys.path (import precedence) | `~/Desktop/pico-mini` inserted before `from agent import ...` | `mlx/agent_benchmark.py:47–48` — shadows repo `agent.py` with machine-local code |
 | HuggingFace model IDs | `mlx-community/Qwen3.5-9B-MLX-4bit`, etc. | `mlx/mlx_engine.py:25–26`, `mlx/benchmark.py:152` |
 | GGUF model | `~/models/Qwen3.5-9B-Q4_K_M.gguf` | `mlx/benchmark.py:61`, `mlx/agent_benchmark.py:28` |
 
@@ -218,7 +218,7 @@ Importing these modules mutates the user's home directory without an explicit us
 | Session commands | `/loop`, `/save`, `/add-dir` (includes `os.chdir`), `/bench`, grading |
 | Main REPL | `main()` — orchestrates all of the above |
 
-**Why prototype-only (inferred):** There is no separation between UI, policy, tool execution, and runtime management. Any reuse of `agent.py` as a library (as `mlx/agent_benchmark.py` does via `from agent import ...`) inherits import-time log directory creation and exposes shell/network/tool surfaces. None of this matches the fail-closed, typed, model-independent foundation described in `AGENTS.md`.
+**Why prototype-only (inferred):** There is no separation between UI, policy, tool execution, and runtime management. `mlx/agent_benchmark.py` illustrates a further hazard: it prepends `~/Desktop/pico-mini` before `from agent import ...`, so the benchmark may execute an **external** `agent.py` rather than the pinned repo copy. Any library-style reuse therefore inherits unknown import-time side effects and shell/network/tool surfaces. None of this matches the fail-closed, typed, model-independent foundation described in `AGENTS.md`.
 
 **Observed fact:** `docs/upstream/mac-code.md` already marks all imported paths as prototype-only and not the production CLI.
 
