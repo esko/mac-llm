@@ -8,7 +8,28 @@ import sys
 
 from mac_llm import __version__
 from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager, render_start_command
+from mac_llm.roles.select import UnknownRoleError, select_target
 from mac_llm.runtime.target import UnknownTargetError, get_target
+
+
+def _cmd_role_select(role: str, difficulty: str) -> int:
+    try:
+        result = select_target(role, difficulty=difficulty)
+    except UnknownRoleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except UnknownTargetError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    payload = {
+        "role": role,
+        "target_id": result.target_id,
+        "deep_escalation": result.deep_escalation,
+        "cache_strategy": result.cache_strategy,
+    }
+    sys.stdout.write(json.dumps(payload) + "\n")
+    return 0
 
 
 def _cmd_runtime_render(target_id: str) -> int:
@@ -140,6 +161,21 @@ def main(argv: list[str] | None = None) -> None:
 
     subparsers = parser.add_subparsers(dest="command")
 
+    role_parser = subparsers.add_parser("role", help="Role-target selection")
+    role_subparsers = role_parser.add_subparsers(dest="role_command")
+
+    select_parser = role_subparsers.add_parser(
+        "select",
+        help="Print the resolved runtime target for a role",
+    )
+    select_parser.add_argument("role", help="Agent role (e.g. review, coding)")
+    select_parser.add_argument(
+        "--difficulty",
+        default="medium",
+        choices=["low", "medium", "high", "very_high"],
+        help="Task difficulty hint for deep-escalation policy",
+    )
+
     runtime_parser = subparsers.add_parser("runtime", help="Runtime management")
     runtime_subparsers = runtime_parser.add_subparsers(dest="runtime_command")
 
@@ -180,6 +216,10 @@ def main(argv: list[str] | None = None) -> None:
     orphan_parser.add_argument("target_id", help="Runtime target id")
 
     args = parser.parse_args(argv)
+
+    if args.command == "role":
+        if args.role_command == "select":
+            raise SystemExit(_cmd_role_select(args.role, args.difficulty))
 
     if args.command == "runtime":
         if args.runtime_command == "render":
