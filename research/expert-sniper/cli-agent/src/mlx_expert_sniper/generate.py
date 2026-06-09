@@ -5,11 +5,32 @@ import numpy as np
 STOP_TOKENS = {"<|im_end|>", "<|endoftext|>", "<|im_start|>"}
 
 
+def ensure_gemma4_chat_template(model_dir: str) -> None:
+    """Copy chat_template.jinja into the model dir when preprocess omitted it."""
+    dest = os.path.join(model_dir, "chat_template.jinja")
+    if os.path.exists(dest):
+        return
+    try:
+        from huggingface_hub import hf_hub_download
+
+        hf_hub_download(
+            "google/gemma-4-26B-A4B-it",
+            "chat_template.jinja",
+            local_dir=model_dir,
+        )
+    except Exception:
+        return
+
+
 def load_engine(model_dir):
     """Load engine with calibration. Returns (engine, bias, model_type)."""
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     import mlx.core as mx
     from .calibrate import load_calibration, auto_size_cache, _detect_model_type
+
+    model_type = _detect_model_type(model_dir)
+    if "gemma4" in model_type:
+        ensure_gemma4_chat_template(model_dir)
 
     cal = load_calibration(model_dir)
     if cal:
@@ -19,7 +40,6 @@ def load_engine(model_dir):
         cache_size, _, _ = auto_size_cache(model_dir)
         bias = 0.0
 
-    model_type = _detect_model_type(model_dir)
     if "gemma4" in model_type:
         from . import engine_gemma4 as engine_mod
         engine_mod.MODEL_DIR = model_dir
@@ -50,7 +70,7 @@ def generate_stream(engine, messages, bias=0.0, max_tokens=200):
     # Detect model type — Gemma 4 uses its own forward pass
     is_gemma4 = hasattr(engine, 'per_expert_scales')  # Gemma 4 engine has this
     if is_gemma4:
-        return _generate_stream_gemma4(engine, messages, max_tokens)
+        return _generate_stream_gemma4(engine, messages, bias=bias, max_tokens=max_tokens)
 
     from .engine import run_expert_ffn
     has_ssm = hasattr(engine.model.model, 'fa_idx')
@@ -161,13 +181,11 @@ def generate_stream(engine, messages, bias=0.0, max_tokens=200):
         mx.eval(logits)
 
 
-# Gemma 4 control token ids (see moe_agent_gemma4.py / google/gemma-4-26B-A4B-it)
-_GEMMA4_BOS = 2
-_GEMMA4_TURN_START = 105
-_GEMMA4_TURN_END = 106
-_GEMMA4_NEWLINE = 107
-def _gemma4_encode_piece(tok, text: str) -> list[int]:
-    """Encode one prompt fragment without adding another BOS."""
+_GEMMA4_GENERATION_PRIME = "<|turn>model\n<|channel>thought\n "
+
+
+def _gemma4_encode_text(tok, text: str) -> list[int]:
+    """Encode a fully formatted Gemma 4 prompt string."""
     try:
         enc = tok.encode(text, add_special_tokens=False)
     except TypeError:
@@ -198,47 +216,136 @@ def _gemma4_normalize_messages(messages: list[dict]) -> list[dict]:
     return normalized
 
 
+def _gemma4_manual_chat_text(tok, messages: list[dict]) -> str:
+    """Build Gemma 4 chat text matching the official template (thinking off)."""
+    bos = getattr(tok, "bos_token", None) or "<bos>"
+    parts = [bos]
+    for msg in messages:
+        role = "model" if msg["role"] == "assistant" else msg["role"]
+        parts.append(f"<|turn>{role}\n{msg['content']} \n")
+    parts.append(_GEMMA4_GENERATION_PRIME)
+    return "".join(parts)
+
+
 def _gemma4_chat_tokens(tok, messages: list[dict]) -> list[int]:
-    """Build Gemma 4 instruct tokens manually.
+    """Tokenize Gemma 4 chat input with the official empty-thinking prime."""
+    normalized = _gemma4_normalize_messages(messages)
 
-    HF apply_chat_template is unreliable here: preprocess does not copy
-    chat_template.jinja, so tokenization often misses <|turn|> markers and the
-    model immediately emits EOS. Matches the working mlx-sniper reference layout.
-    """
-    nl = "\n"
-    tokens = [_GEMMA4_BOS, _GEMMA4_TURN_START]
+    if getattr(tok, "chat_template", None):
+        try:
+            text = tok.apply_chat_template(
+                normalized,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            return _gemma4_encode_text(tok, text)
+        except Exception:
+            pass
 
-    for msg in _gemma4_normalize_messages(messages):
-        role = msg["role"]
-        content = msg["content"]
-        if role == "user":
-            tokens.extend(_gemma4_encode_piece(tok, "user" + nl))
-            tokens.extend(_gemma4_encode_piece(tok, content))
-        elif role == "assistant":
-            tokens.extend(_gemma4_encode_piece(tok, "model" + nl))
-            tokens.extend(_gemma4_encode_piece(tok, content))
-        else:
-            continue
-        tokens.extend([_GEMMA4_TURN_END, _GEMMA4_NEWLINE, _GEMMA4_TURN_START])
-
-    # Generation prompt: model turn (matches moe_agent_gemma4.py)
-    tokens.extend(_gemma4_encode_piece(tok, "model" + nl))
-    return tokens
+    return _gemma4_encode_text(tok, _gemma4_manual_chat_text(tok, normalized))
 
 
 def _gemma4_generation_stop_ids(tok) -> set[int]:
-    """Stop tokens during Gemma 4 generation (<eos> and turn end)."""
-    stop = {_GEMMA4_TURN_END, 1}
-    if hasattr(tok, "eos_token_id"):
-        if isinstance(tok.eos_token_id, list):
-            stop.update(tok.eos_token_id)
-        elif tok.eos_token_id is not None:
-            stop.add(tok.eos_token_id)
-    return stop
+    """Stop tokens during Gemma 4 generation."""
+    from .calibrate import _gemma4_eos_ids
+
+    return _gemma4_eos_ids(tok)
 
 
-def _generate_stream_gemma4(engine, messages, max_tokens=200):
-    """Generator for Gemma 4 — uses engine's own forward pass."""
+def _gemma4_forward(engine, input_ids, bias: float = 0.0):
+    """Gemma 4 forward with optional calibrated routing bias."""
+    import mlx.core as mx
+    from mlx_lm.models.base import create_attention_mask
+    from .calibrate import _gemma4_route
+    from .engine_gemma4 import run_expert_ffn_gemma4
+
+    args = engine.model.args
+    num_experts = args.num_experts
+    first_global = next(
+        (i for i, lt in enumerate(args.layer_types) if lt == "full_attention"), 0
+    )
+    first_sliding = next(
+        (i for i, lt in enumerate(args.layer_types) if lt == "sliding_attention"), 0
+    )
+
+    h = engine.model.model.embed_tokens(input_ids)
+    h = h * mx.array(args.hidden_size ** 0.5, dtype=h.dtype)
+    global_mask = create_attention_mask(h, engine.cache[first_global])
+    sliding_mask = create_attention_mask(
+        h, engine.cache[first_sliding], window_size=args.sliding_window
+    )
+
+    for i in range(engine.num_layers):
+        layer = engine.model.model.layers[i]
+        mask = global_mask if args.layer_types[i] == "full_attention" else sliding_mask
+
+        residual = h
+        h = layer.input_layernorm(h)
+        h = layer.self_attn(h, mask, engine.cache[i])
+        h = layer.post_attention_layernorm(h)
+        h = residual + h
+        mx.eval(h)
+
+        residual = h
+        h = layer.pre_feedforward_layernorm(h)
+        dense_out = layer.mlp(h)
+
+        if layer.enable_moe_block:
+            h_dense = layer.post_feedforward_layernorm_1(dense_out)
+            B, L, D = residual.shape
+            residual_flat = residual.reshape(-1, D)
+            router_weights, router_indices = _gemma4_route(
+                layer,
+                residual_flat,
+                layer_idx=i,
+                reader=engine.reader,
+                num_experts=num_experts,
+                bias=bias,
+            )
+            mx.eval(router_weights, router_indices)
+            active_ids = list(set(int(e) for e in np.array(router_indices).flatten()))
+            engine.coact.record_layer(i, active_ids)
+            if engine.coact.ready and i + 1 < engine.num_layers:
+                predicted = engine.coact.predict_next_layer(i, active_ids, top_k=6)
+                if predicted:
+                    to_fetch = [
+                        eid
+                        for eid in predicted
+                        if engine.reader.lru and engine.reader.lru.get(i + 1, eid) is None
+                    ]
+                    if to_fetch:
+                        engine.reader.prefetch_experts(i + 1, to_fetch)
+            if i + 1 < engine.num_layers:
+                engine.reader.prefetch_experts(i + 1, active_ids)
+            expert_data = engine.reader.get_experts(i, active_ids)
+            moe_input = layer.pre_feedforward_layernorm_2(residual_flat)
+            expert_out = run_expert_ffn_gemma4(
+                moe_input.reshape(B, L, D),
+                expert_data,
+                router_indices.reshape(B, L, -1),
+                router_weights.reshape(B, L, -1),
+                per_expert_scale=engine.per_expert_scales.get(i),
+            )
+            h_moe = layer.post_feedforward_layernorm_2(expert_out)
+            h = h_dense + h_moe
+            h = layer.post_feedforward_layernorm(h)
+            del expert_data, expert_out
+        else:
+            h = layer.post_feedforward_layernorm(dense_out)
+
+        h = residual + h
+        h = h * layer.layer_scalar
+        mx.eval(h)
+        mx.clear_cache()
+
+    engine.coact.end_token()
+    h = engine.model.model.norm(h)
+    return engine._apply_lm_head(h)
+
+
+def _generate_stream_gemma4(engine, messages, bias=0.0, max_tokens=200):
+    """Generator for Gemma 4 with official chat formatting and routing bias."""
     import mlx.core as mx
 
     engine.reset_cache()
@@ -246,7 +353,7 @@ def _generate_stream_gemma4(engine, messages, max_tokens=200):
     tokens = _gemma4_chat_tokens(tok, messages)
     input_ids = mx.array([tokens])
 
-    logits = engine.forward(input_ids)
+    logits = _gemma4_forward(engine, input_ids, bias=bias)
     mx.eval(logits)
 
     eos_ids = _gemma4_generation_stop_ids(tok)
@@ -261,5 +368,32 @@ def _generate_stream_gemma4(engine, messages, max_tokens=200):
         if any(st in chunk for st in STOP_TOKENS):
             break
         yield chunk
-        logits = engine.forward(token.reshape(1, 1))
+        logits = _gemma4_forward(engine, token.reshape(1, 1), bias=bias)
         mx.eval(logits)
+
+
+def probe_gemma4_generation(engine, messages, *, bias: float = 0.0) -> dict:
+    """Return prompt/first-token diagnostics for Gemma 4 generation."""
+    import mlx.core as mx
+
+    tok = engine.tokenizer
+    normalized = _gemma4_normalize_messages(messages)
+    tokens = _gemma4_chat_tokens(tok, messages)
+    eos_ids = _gemma4_generation_stop_ids(tok)
+
+    engine.reset_cache()
+    logits = _gemma4_forward(engine, mx.array([tokens]), bias=bias)
+    mx.eval(logits)
+    first_tid = int(mx.argmax(logits[:, -1, :], axis=-1).item())
+    first_decoded = tok.decode([first_tid])
+
+    return {
+        "chat_template_set": bool(getattr(tok, "chat_template", None)),
+        "prompt_tokens": len(tokens),
+        "prompt_tail_ids": tokens[-12:],
+        "prompt_tail_text": _gemma4_manual_chat_text(tok, normalized)[-120:],
+        "first_token_id": first_tid,
+        "first_token_text": first_decoded,
+        "first_token_is_stop": first_tid in eos_ids,
+        "stop_ids": sorted(eos_ids),
+    }

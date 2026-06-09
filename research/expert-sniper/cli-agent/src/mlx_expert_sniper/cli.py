@@ -101,6 +101,22 @@ def cmd_run(args):
         print()
 
 
+def cmd_probe(args):
+    import json
+    from .generate import load_engine, probe_gemma4_generation
+
+    print("Loading model...", end=" ", flush=True)
+    eng, bias, model_type = load_engine(args.model_dir)
+    print(f"ready ({model_type}).")
+    if "gemma4" not in model_type:
+        print("probe is currently implemented for Gemma 4 models only.")
+        return
+
+    messages = [{"role": "user", "content": args.prompt}]
+    report = probe_gemma4_generation(eng, messages, bias=bias)
+    print(json.dumps(report, indent=2))
+
+
 def cmd_chat(args):
     from .generate import load_engine, generate_stream
     from .calibrate import load_calibration
@@ -209,6 +225,16 @@ def main():
     p.add_argument("model_dir", help="Path to sniper model directory")
     p.add_argument("--max-tokens", type=int, default=500)
 
+    # probe
+    p = sub.add_parser("probe", help="Diagnose Gemma 4 prompt/first-token generation")
+    p.add_argument("model_dir", help="Path to sniper model directory")
+    p.add_argument(
+        "--prompt",
+        "-p",
+        default="Say hello in one sentence.",
+        help="User prompt to test",
+    )
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
@@ -220,6 +246,7 @@ def main():
         "calibrate": cmd_calibrate,
         "run": cmd_run,
         "chat": cmd_chat,
+        "probe": cmd_probe,
     }
     cmds[args.command](args)
 

@@ -1,4 +1,4 @@
-"""Tests for Gemma 4 manual chat tokenization in mlx-sniper generate."""
+"""Tests for Gemma 4 chat formatting in mlx-sniper generate."""
 
 from __future__ import annotations
 
@@ -14,29 +14,40 @@ CLI_AGENT_SRC = (
 )
 sys.path.insert(0, str(CLI_AGENT_SRC))
 
-from mlx_expert_sniper.generate import _gemma4_chat_tokens
+from mlx_expert_sniper.generate import (
+    _gemma4_chat_tokens,
+    _gemma4_manual_chat_text,
+    _gemma4_normalize_messages,
+)
 
 
 class _MockTokenizer:
+    bos_token = "<bos>"
+    chat_template = None
+
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        if text == "user\n":
-            return [1000]
-        if text == "model\n":
-            return [1001]
-        return [2000 + len(text)]
+        return [1000 + len(text)]
 
 
-def test_gemma4_chat_tokens_single_user_turn() -> None:
+def test_gemma4_manual_chat_text_uses_official_generation_prime() -> None:
     tok = _MockTokenizer()
-    messages = [{"role": "user", "content": "Say hello in one sentence."}]
+    messages = _gemma4_normalize_messages(
+        [{"role": "user", "content": "Say hello in one sentence."}]
+    )
+    text = _gemma4_manual_chat_text(tok, messages)
+
+    assert text.startswith("<bos>")
+    assert "<|turn>user\nSay hello in one sentence." in text
+    assert text.endswith("<|turn>model\n<|channel>thought\n ")
+
+
+def test_gemma4_chat_tokens_encodes_full_prompt() -> None:
+    tok = _MockTokenizer()
+    messages = [{"role": "user", "content": "Hi"}]
 
     tokens = _gemma4_chat_tokens(tok, messages)
 
-    assert tokens[:2] == [2, 105]
-    assert tokens[-1] == 1001
-    assert [106, 107, 105] in (
-        tokens[i : i + 3] for i in range(len(tokens) - 2)
-    )
+    assert tokens == [1000 + len(_gemma4_manual_chat_text(tok, messages))]
 
 
 def test_gemma4_chat_tokens_folds_system_into_user() -> None:
@@ -45,9 +56,7 @@ def test_gemma4_chat_tokens_folds_system_into_user() -> None:
         {"role": "system", "content": "Be brief."},
         {"role": "user", "content": "Hi"},
     ]
+    text = _gemma4_manual_chat_text(tok, _gemma4_normalize_messages(messages))
 
-    tokens = _gemma4_chat_tokens(tok, messages)
-
-    assert tokens[0:2] == [2, 105]
-    assert 1000 in tokens
-    assert tokens[-1] == 1001
+    assert "Be brief.\n\nHi" in text
+    assert "<|turn>user\nBe brief.\n\nHi" in text
