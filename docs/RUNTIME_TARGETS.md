@@ -93,4 +93,14 @@ Stop the managed runtime (targeted PID only; no `pkill`):
 mac-llm runtime stop local_fast
 ```
 
+Run an OpenAI-compatible smoke request and write a benchmark artifact under `benchmarks/runs/<timestamp>/`:
+
+```bash
+export MAC_LLM_MODEL_LOCAL_DEEP_MOE=/path/to/model
+mac-llm runtime start local_deep_moe
+mac-llm runtime smoke local_deep_moe
+```
+
+The smoke command records `runtime_type`, load time, TTFT, tok/s, memory pressure, and orphan status. When the server or model is unavailable, it exits non-zero and still writes a failure artifact with the captured fields.
+
 State is written under the target `state_path` from the render output (for `local_fast`, `~/.mac-llm/state/local_fast.json`). Logs append to the target `log_path`.

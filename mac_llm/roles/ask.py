@@ -9,7 +9,7 @@ from typing import Any, Callable, Protocol
 
 from mac_llm.artifacts.schemas import make_user_task_summary
 from mac_llm.bench.artifacts import BenchmarkArtifactWriter, RunRecord
-from mac_llm.roles.config import DEFAULT_ROLE_TARGETS, KNOWN_ROLES
+from mac_llm.roles.config import DEFAULT_ROLE_TARGETS, KNOWN_ROLES, resolve_role_target
 from mac_llm.roles.select import SelectionResult, UnknownRoleError, select_target
 from mac_llm.runtime.completion import CompletionResult, run_completion
 from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager
@@ -84,13 +84,13 @@ def _manual_selection(role: str, *, difficulty: str) -> SelectionResult:
         raise UnknownRoleError(f"unknown role: {role}")
 
     mapping = DEFAULT_ROLE_TARGETS[role]
-    get_target(mapping.default_target)
+    default_target_id = resolve_role_target(mapping.default_target)
     if mapping.deep_target != "disabled":
-        get_target(mapping.deep_target)
+        resolve_role_target(mapping.deep_target)
 
     selection = select_target(role, difficulty=difficulty)
     return SelectionResult(
-        target_id=mapping.default_target,
+        target_id=default_target_id,
         deep_escalation=selection.deep_escalation,
         cache_strategy=selection.cache_strategy,
     )

@@ -8,11 +8,56 @@ import sys
 from pathlib import Path
 
 from mac_llm import __version__
+from mac_llm.bench.swap import run_swap_benchmark
 from mac_llm.roles.ask import AskError, run_ask
 from mac_llm.roles.config import ASK_CLI_ROLES
-from mac_llm.roles.select import UnknownRoleError
+from mac_llm.roles.select import UnknownRoleError, select_target
 from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager, render_start_command
+from mac_llm.runtime.smoke import run_smoke
 from mac_llm.runtime.target import UnknownTargetError, get_target
+
+
+def _cmd_role_select(role: str, difficulty: str) -> int:
+    try:
+        result = select_target(role, difficulty=difficulty)
+    except UnknownRoleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except UnknownTargetError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    payload = {
+        "role": role,
+        "target_id": result.target_id,
+        "deep_escalation": result.deep_escalation,
+        "cache_strategy": result.cache_strategy,
+    }
+    sys.stdout.write(json.dumps(payload) + "\n")
+    return 0
+
+
+def _cmd_ask(role: str, prompt: str) -> int:
+    try:
+        result = run_ask(role, prompt, root=Path.cwd())
+    except UnknownRoleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AskError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if not result.success:
+        print(result.error or "ask failed", file=sys.stderr)
+        print(f"artifact: {result.artifact_path}", file=sys.stderr)
+        return 1
+
+    if result.response_text is not None:
+        sys.stdout.write(result.response_text)
+        if not result.response_text.endswith("\n"):
+            sys.stdout.write("\n")
+    print(f"artifact: {result.artifact_path}", file=sys.stderr)
+    return 0
 
 
 def _cmd_runtime_render(target_id: str) -> int:
@@ -111,27 +156,19 @@ def _cmd_runtime_health(target_id: str) -> int:
     return 0 if result.ok else 1
 
 
-def _cmd_ask(role: str, prompt: str) -> int:
-    try:
-        result = run_ask(role, prompt, root=Path.cwd())
-    except UnknownRoleError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    except AskError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+def _cmd_bench_swap(from_target_id: str, to_target_id: str) -> int:
+    result = run_swap_benchmark(
+        from_target_id=from_target_id,
+        to_target_id=to_target_id,
+    )
+    rel_dir = result.run_dir.relative_to(Path.cwd())
+    if result.ok:
+        print(f"benchmark completed; artifacts in {rel_dir}")
+        return 0
 
-    if not result.success:
-        print(result.error or "ask failed", file=sys.stderr)
-        print(f"artifact: {result.artifact_path}", file=sys.stderr)
-        return 1
-
-    if result.response_text is not None:
-        sys.stdout.write(result.response_text)
-        if not result.response_text.endswith("\n"):
-            sys.stdout.write("\n")
-    print(f"artifact: {result.artifact_path}", file=sys.stderr)
-    return 0
+    print(result.message, file=sys.stderr)
+    print(f"failure artifact written to {rel_dir}", file=sys.stderr)
+    return 1
 
 
 def _cmd_runtime_orphan_check(target_id: str) -> int:
@@ -154,6 +191,21 @@ def _cmd_runtime_orphan_check(target_id: str) -> int:
     return 1 if result.has_orphan else 0
 
 
+def _cmd_runtime_smoke(target_id: str, artifact_root: str | None) -> int:
+    try:
+        target = get_target(target_id)
+    except UnknownTargetError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    root = Path(artifact_root) if artifact_root else Path.cwd()
+    result = run_smoke(target, artifact_root=root)
+    payload = result.record.to_dict()
+    payload["artifact_dir"] = str(result.artifact_dir)
+    sys.stdout.write(json.dumps(payload) + "\n")
+    return 0 if result.record.status == "ok" else 1
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="mac-llm",
@@ -166,6 +218,33 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     subparsers = parser.add_subparsers(dest="command")
+
+    role_parser = subparsers.add_parser("role", help="Role-target selection")
+    role_subparsers = role_parser.add_subparsers(dest="role_command")
+
+    select_parser = role_subparsers.add_parser(
+        "select",
+        help="Print the resolved runtime target for a role",
+    )
+    select_parser.add_argument("role", help="Agent role (e.g. review, coding)")
+    select_parser.add_argument(
+        "--difficulty",
+        default="medium",
+        choices=["low", "medium", "high", "very_high"],
+        help="Task difficulty hint for deep-escalation policy",
+    )
+
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="Run a prompt with manual role selection (no automatic router)",
+    )
+    ask_parser.add_argument(
+        "--role",
+        required=True,
+        choices=sorted(ASK_CLI_ROLES),
+        help="Agent role for target selection",
+    )
+    ask_parser.add_argument("prompt", help="Prompt text")
 
     runtime_parser = subparsers.add_parser("runtime", help="Runtime management")
     runtime_subparsers = runtime_parser.add_subparsers(dest="runtime_command")
@@ -206,22 +285,44 @@ def main(argv: list[str] | None = None) -> None:
     )
     orphan_parser.add_argument("target_id", help="Runtime target id")
 
-    ask_parser = subparsers.add_parser(
-        "ask",
-        help="Run a prompt with manual role selection (no automatic router)",
+    smoke_parser = runtime_subparsers.add_parser(
+        "smoke",
+        help="Run an OpenAI-compatible smoke request and write a benchmark artifact",
     )
-    ask_parser.add_argument(
-        "--role",
+    smoke_parser.add_argument("target_id", help="Runtime target id")
+    smoke_parser.add_argument(
+        "--artifact-root",
+        help="Directory root for benchmarks/runs artifacts (default: current directory)",
+    )
+
+    bench_parser = subparsers.add_parser("bench", help="Benchmark commands")
+    bench_subparsers = bench_parser.add_subparsers(dest="bench_command")
+
+    swap_parser = bench_subparsers.add_parser(
+        "swap",
+        help="Run a fast→fast swap benchmark with artifact output",
+    )
+    swap_parser.add_argument(
+        "--from",
+        dest="from_target",
         required=True,
-        choices=sorted(ASK_CLI_ROLES),
-        help="Agent role for target selection",
+        help="Source runtime target id",
     )
-    ask_parser.add_argument("prompt", help="Prompt text")
+    swap_parser.add_argument(
+        "--to",
+        dest="to_target",
+        required=True,
+        help="Destination runtime target id",
+    )
 
     args = parser.parse_args(argv)
 
     if args.command == "ask":
         raise SystemExit(_cmd_ask(args.role, args.prompt))
+
+    if args.command == "role":
+        if args.role_command == "select":
+            raise SystemExit(_cmd_role_select(args.role, args.difficulty))
 
     if args.command == "runtime":
         if args.runtime_command == "render":
@@ -236,6 +337,12 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_runtime_health(args.target_id))
         if args.runtime_command == "orphan-check":
             raise SystemExit(_cmd_runtime_orphan_check(args.target_id))
+        if args.runtime_command == "smoke":
+            raise SystemExit(_cmd_runtime_smoke(args.target_id, args.artifact_root))
+
+    if args.command == "bench":
+        if args.bench_command == "swap":
+            raise SystemExit(_cmd_bench_swap(args.from_target, args.to_target))
 
     parser.print_help()
 

@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mac_llm.roles.config import DEFAULT_ROLE_TARGETS, KNOWN_ROLES, RoleTargetMapping
-from mac_llm.runtime.target import get_target
+from mac_llm.roles.config import (
+    DEFAULT_ROLE_TARGETS,
+    KNOWN_ROLES,
+    RoleTargetMapping,
+    resolve_role_target,
+    validate_role_targets,
+)
+from mac_llm.runtime.target import UnknownTargetError
 
 
 class UnknownRoleError(ValueError):
@@ -21,10 +27,10 @@ class SelectionResult:
     cache_strategy: str
 
 
-def _validate_mapping(role: str, mapping: RoleTargetMapping) -> None:
-    get_target(mapping.default_target)
+def _validate_mapping(mapping: RoleTargetMapping) -> None:
+    resolve_role_target(mapping.default_target)
     if mapping.deep_target != "disabled":
-        get_target(mapping.deep_target)
+        resolve_role_target(mapping.deep_target)
 
 
 def select_target(role: str, *, difficulty: str = "medium") -> SelectionResult:
@@ -33,15 +39,18 @@ def select_target(role: str, *, difficulty: str = "medium") -> SelectionResult:
         raise UnknownRoleError(f"unknown role: {role}")
 
     mapping = DEFAULT_ROLE_TARGETS[role]
-    _validate_mapping(role, mapping)
+    try:
+        _validate_mapping(mapping)
+    except UnknownTargetError:
+        raise
 
     deep_escalation = _deep_escalation_indicated(mapping, difficulty)
-    target_id = mapping.default_target
+    configured_target = mapping.default_target
     if deep_escalation and mapping.deep_target != "disabled":
-        target_id = mapping.deep_target
+        configured_target = mapping.deep_target
 
     return SelectionResult(
-        target_id=target_id,
+        target_id=resolve_role_target(configured_target),
         deep_escalation=deep_escalation,
         cache_strategy="role_prefix",
     )
@@ -59,3 +68,6 @@ def _deep_escalation_indicated(mapping: RoleTargetMapping, difficulty: str) -> b
     if threshold == "high_after_evidence":
         return difficulty in {"high", "very_high"}
     return False
+
+
+validate_role_targets()
