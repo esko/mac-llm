@@ -244,7 +244,7 @@ Proves start→prompt→stop twice with artifact output:
 mac-llm bench swap --from local_fast --to local_fast
 ```
 
-Artifacts land in `benchmarks/runs/<timestamp>/`.
+See [Benchmarking](#benchmarking) for the full proof sequence, artifact format, and how to interpret results.
 
 ---
 
@@ -340,13 +340,7 @@ mac-llm bench swap-sequence local_fast local_deep_moe local_fast
 mac-llm bench kv --target local_deep_moe --prefix repo-review
 ```
 
-On success or failure, benchmarks write under:
-
-```text
-benchmarks/runs/<timestamp>/
-  run.jsonl    # append-only event log
-  summary.md   # human-readable summary
-```
+Each run writes `benchmarks/runs/<timestamp>/run.jsonl` + `summary.md`. Details: [Benchmarking](#benchmarking).
 
 ---
 
@@ -360,6 +354,143 @@ benchmarks/runs/<timestamp>/
 Model candidates and promotion rules: [`docs/RUNTIME_TARGETS.md`](docs/RUNTIME_TARGETS.md).
 
 Memory bands (green ≤12 GB … red >20 GB): [`docs/24GB_PROFILE_POLICY.md`](docs/24GB_PROFILE_POLICY.md).
+
+---
+
+## Benchmarking
+
+Benchmarks are how `mac-llm` proves the 24 GB runtime hypothesis: **one active model, safe swaps, measurable artifacts, no orphan processes**. Every benchmark writes structured output under `benchmarks/runs/<timestamp>/` in the repo (or `--artifact-root` for smoke).
+
+`mac-llm` is not a model leaderboard. Run benchmarks to validate **your** models on **your** Mac Mini before promoting them to default role mappings.
+
+### What gets measured
+
+| Signal | Where recorded | Used for |
+|--------|----------------|----------|
+| Load / start time | swap, swap-sequence, smoke | Swap latency, cold-start cost |
+| TTFT, tok/s | swap cycles, smoke, kv | Inference quality of service |
+| Memory pressure | system metric probes | Green/yellow/orange/red band checks |
+| Swap delta | system metric probes | Detect swap thrashing during swaps |
+| Orphan status | orphan-check per cycle | Prove clean teardown |
+| Cache save/load, helped verdict | `bench kv` | Prompt-cache ROI |
+| Per-step target metadata | swap-sequence | fast→deep→fast proof |
+
+Failures are first-class: benchmarks exit non-zero **and** write a failure artifact with the captured fields so you can debug without re-running blindly.
+
+### Artifact layout
+
+Each run creates:
+
+```text
+benchmarks/runs/20260609T120000Z/
+  run.jsonl     # append-only JSON lines (schema_version, run_id, event, status, metadata)
+  summary.md    # human-readable event list derived from run.jsonl
+```
+
+Example `run.jsonl` events:
+
+```json
+{"schema_version": 1, "run_id": "20260609T120000Z", "event": "bench.swap.start", "status": "ok", "metadata": {"from": "local_fast", "to": "local_fast"}}
+{"schema_version": 1, "run_id": "20260609T120000Z", "event": "bench.swap.system_metrics", "status": "ok", "metadata": {"metrics": {"memory_pressure": {"status": "ok"}, "swap_delta": {"status": "ok"}}}}
+```
+
+Inspect the latest run:
+
+```bash
+ls -lt benchmarks/runs/ | head
+cat benchmarks/runs/<timestamp>/summary.md
+tail benchmarks/runs/<timestamp>/run.jsonl
+```
+
+### Recommended benchmark sequence
+
+Run from the repo root with [models installed](#model-setup). **Stop each target before starting the next** — only one active large runtime at a time.
+
+#### Step 1 — Per-target smoke
+
+Confirms the OpenAI-compatible API, records load time, TTFT, tok/s, memory, and orphan fields:
+
+```bash
+mac-llm runtime start local_fast
+mac-llm runtime smoke local_fast
+mac-llm runtime stop local_fast
+
+mac-llm runtime start local_deep_moe
+mac-llm runtime smoke local_deep_moe
+mac-llm runtime stop local_deep_moe
+```
+
+#### Step 2 — Fast→fast swap (lifecycle proof)
+
+Runs two full start→prompt→stop cycles on `local_fast`. Verifies managed lifecycle + artifact writer + **no orphan** after success or failure:
+
+```bash
+mac-llm bench swap --from local_fast --to local_fast
+```
+
+Currently requires `local_fast` for both `--from` and `--to`. This is the minimum bar before multi-target swaps.
+
+#### Step 3 — Fast→deep→fast swap-sequence (primary runtime proof)
+
+The north-star scenario from [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md):
+
+```bash
+mac-llm bench swap-sequence local_fast local_deep_moe local_fast
+```
+
+Each step: ensure inactive → start → fixed prompt → stop. Review per-step timings and orphan checks in `summary.md`.
+
+#### Step 4 — Prompt-cache benchmark (optional)
+
+Compares cold vs warm/restored KV cache for a named prefix:
+
+```bash
+mac-llm bench kv --target local_deep_moe --prefix repo-review
+```
+
+Requires KV runtime integration; fails clearly with an artifact when the runtime layer is unavailable.
+
+### Example: full local proof session
+
+```bash
+cd mac-llm
+source .venv/bin/activate
+
+# 1. Smoke both targets
+mac-llm runtime start local_fast && mac-llm runtime smoke local_fast && mac-llm runtime stop local_fast
+mac-llm runtime start local_deep_moe && mac-llm runtime smoke local_deep_moe && mac-llm runtime stop local_deep_moe
+
+# 2. Swap proofs
+mac-llm bench swap --from local_fast --to local_fast
+mac-llm bench swap-sequence local_fast local_deep_moe local_fast
+
+# 3. Review artifacts
+latest=$(ls -t benchmarks/runs | head -1)
+cat "benchmarks/runs/$latest/summary.md"
+```
+
+### Interpreting results
+
+Before promoting a model or target, check:
+
+1. **Orphan check** — `runtime orphan-check <target>` returns clean after every benchmark; swap benchmarks assert this in artifacts.
+2. **Memory band** — resident memory fits [`docs/24GB_PROFILE_POLICY.md`](docs/24GB_PROFILE_POLICY.md) for the intended role (green for `local_fast`, yellow for `local_deep_moe`).
+3. **Swap delta** — swap usage should not spike uncontrollably during fast→deep→fast sequences.
+4. **TTFT / tok/s** — acceptable for the role (coding vs review); record numbers in the artifact for comparison across model candidates.
+5. **Orange/red** — if resident memory exceeds 17 GB, do not promote without explicit human approval and a saved benchmark artifact.
+
+A target graduates from “candidate” to “configured default” only after: render works, lifecycle passes, benchmarks record the fields above, and memory band rules are satisfied. See [`docs/RUNTIME_TARGETS.md`](docs/RUNTIME_TARGETS.md#promotion-discipline).
+
+### Benchmark commands (quick reference)
+
+| Command | Milestone | Purpose |
+|---------|-----------|---------|
+| `mac-llm runtime smoke <target>` | Per-target health | API + inference smoke + artifact |
+| `mac-llm bench swap --from local_fast --to local_fast` | M3 | Managed swap + orphan guarantee |
+| `mac-llm bench swap-sequence local_fast local_deep_moe local_fast` | M5 | Primary fast→deep→fast proof |
+| `mac-llm bench kv --target local_deep_moe --prefix <name>` | M6 | Cold vs warm cache comparison |
+
+All commands are also listed under [Benchmark commands](#benchmark-commands) in the command reference.
 
 ---
 
