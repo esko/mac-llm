@@ -20,12 +20,12 @@ Closes #30
 
 ## Known limitations
 
-- Real runtime/cache integration depends on issue #29 (`mac_llm.cache`); CLI fails clearly with artifact until that lands.
+- CLI uses `mac_llm.cache.KvPromptCacheStore` (from #29); `KvRuntimeRunner` is not wired yet, so manual runs fail-clear with artifact until runtime integration lands.
 - No router dependence on cache (per issue scope).
 
 ## Next smallest step
 
-- Wire `mac_llm.cache` + runtime runner once #29 merges; rerun manual benchmark on `local_deep_moe`.
+- Add `mac_llm.cache.runtime.KvRuntimeRunner` and rerun manual benchmark on `local_deep_moe`.
 
 ## Agent checklist
 
