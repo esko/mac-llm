@@ -67,8 +67,8 @@ class ExternalAgentsGate:
         self.policy = policy if policy is not None else DEFAULT_EXTERNAL_AGENTS_POLICY
         self._targets = targets if targets is not None else DEFAULT_EXTERNAL_TARGETS
 
-    def assert_consultation_allowed(self, *, target_id: str, mode: str) -> None:
-        """Raise if consultation would be blocked."""
+    def validate_consultation_shape(self, *, target_id: str, mode: str) -> None:
+        """Raise on invalid consultation mode or target kind (no policy/network check)."""
         if mode not in CONSULTATION_MODES:
             raise ExternalPolicyError(f"unknown consultation mode: {mode}")
 
@@ -78,6 +78,9 @@ class ExternalAgentsGate:
                 f"execution target does not accept consultation: {target_id}"
             )
 
+    def assert_consultation_allowed(self, *, target_id: str, mode: str) -> None:
+        """Raise if consultation would be blocked."""
+        self.validate_consultation_shape(target_id=target_id, mode=mode)
         self._assert_policy_allows(target_id=target_id, interaction="consultation")
 
     def assert_execution_allowed(self, *, target_id: str, mode: str) -> None:
