@@ -12,6 +12,7 @@ from mac_llm.tools.log import (
     estimate_token_size,
     hash_tool_args,
 )
+from mac_llm.tools.edit import EditToolError, execute_approval_gated_tool
 from mac_llm.tools.readonly import ReadOnlyToolError, execute_read_only_tool
 from mac_llm.tools.schema import (
     APPROVAL_GATED_TOOLS,
@@ -87,7 +88,7 @@ class ToolBroker:
         try:
             output = self._execute(call.tool, call.args, resolved_paths)
             status = "ok"
-        except ReadOnlyToolError as exc:
+        except (ReadOnlyToolError, EditToolError) as exc:
             raise ToolBrokerError(str(exc)) from exc
 
         summary = make_tool_result_summary(tool=call.tool, status=status, output=output)
@@ -171,5 +172,12 @@ class ToolBroker:
                 args,
                 resolved_paths=resolved_paths,
                 denied_segments=self.denied_path_segments,
+            )
+        if tool in APPROVAL_GATED_TOOLS:
+            return execute_approval_gated_tool(
+                tool,
+                self.repo_root,
+                args,
+                resolved_paths=resolved_paths,
             )
         raise ToolBrokerError(f"tool not implemented: {tool}")
