@@ -176,7 +176,17 @@ class MoESniperEngineGemma4:
             self.tokenizer = Tokenizer.from_file(tok_path)
         else:
             from transformers import AutoTokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_dir,
+                    trust_remote_code=True,
+                    fix_mistral_regex=True,
+                )
+            except TypeError:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_dir,
+                    trust_remote_code=True,
+                )
 
         # KV cache
         self.cache = self.model.make_cache()

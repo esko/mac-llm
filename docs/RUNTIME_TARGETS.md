@@ -18,12 +18,14 @@ Do not evaluate every model upfront. Start with these candidates from the implem
 ### `local_fast`
 
 - **Primary:** Qwen3.5-9B Q4_K_M (or currently available 9B/12B equivalent)
-- **Later:** newer Qwen 9B/12B variants, Mellum2, Gemma 4 QAT
+- **Alternative (benchmark):** Gemma 4-12B-it Q4_K_M GGUF
+- **Later:** newer Qwen 9B/12B variants, Mellum2
 
 ### `local_deep_moe`
 
 - **Primary:** Qwen3.5-35B-A3B via mlx-sniper
 - **Fallback:** Qwen3-30B-A3B via mlx-sniper
+- **Alternative (benchmark):** Gemma 4-26B-A4B via `mlx-sniper download gemma4-26b` (experimental)
 
 Whichever deep candidate is easiest to run first wins; do not maintain parallel deep targets until the first swap benchmark passes.
 

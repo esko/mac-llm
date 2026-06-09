@@ -19,6 +19,22 @@ BITS = 8  # Q8 experts
 GROUP_SIZE = 32  # Q8 group size from GGUF
 
 
+def _load_gemma4_tokenizer(model_dir: str):
+    """Load Gemma 4 tokenizer; fix known Mistral-derived regex bug in HF tokenizers."""
+    from transformers import AutoTokenizer
+
+    kwargs = {"trust_remote_code": True}
+    try:
+        return AutoTokenizer.from_pretrained(
+            model_dir,
+            fix_mistral_regex=True,
+            **kwargs,
+        )
+    except TypeError:
+        # Older transformers builds lack fix_mistral_regex.
+        return AutoTokenizer.from_pretrained(model_dir, **kwargs)
+
+
 def run_expert_ffn_gemma4(x, expert_data, top_k_indices, top_k_weights,
                            per_expert_scale=None):
     """
@@ -171,12 +187,10 @@ class MoESniperEngineGemma4:
         self.coact = CoActivationTracker(self.num_layers, warmup_tokens=3)
 
         # Load tokenizer
-        from transformers import AutoTokenizer
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+            self.tokenizer = _load_gemma4_tokenizer(MODEL_DIR)
         except Exception:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                "google/gemma-4-26B-A4B-it", trust_remote_code=True)
+            self.tokenizer = _load_gemma4_tokenizer("google/gemma-4-26B-A4B-it")
 
         return pinned_gb
 

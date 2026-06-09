@@ -60,6 +60,47 @@ def _detect_model_type(model_dir):
     return config.get("model_type", "qwen3_5_moe")
 
 
+def _engine_model_dir(engine):
+    return os.path.dirname(engine.reader.expert_dir)
+
+
+def _is_gemma4_engine(engine):
+    return "gemma4" in _detect_model_type(_engine_model_dir(engine))
+
+
+def _gemma4_eos_ids(tok):
+    eos_ids = {1, 106, 212}
+    if hasattr(tok, "eos_token_id"):
+        if isinstance(tok.eos_token_id, list):
+            eos_ids.update(tok.eos_token_id)
+        elif tok.eos_token_id is not None:
+            eos_ids.add(tok.eos_token_id)
+    return eos_ids
+
+
+def _gemma4_route(layer, residual_flat, *, layer_idx, reader, num_experts, bias=0.0):
+    """Gemma 4 router with optional cache bias (mirrors Router.__call__)."""
+    import mlx.core as mx
+
+    router = layer.router
+    x_normed = router._inline_rms_norm(residual_flat)
+    x_normed = x_normed * router.scale * (router.hidden_size ** -0.5)
+    scores = router.proj(x_normed)
+    if bias > 0 and reader is not None and reader.lru is not None:
+        cached_mask = np.zeros(num_experts, dtype=np.float32)
+        for eid in range(num_experts):
+            if reader.lru.get(layer_idx, eid) is not None:
+                cached_mask[eid] = bias
+        scores = scores + mx.array(cached_mask).reshape(1, -1)
+    probs = mx.softmax(scores, axis=-1)
+    top_k_indices = mx.argpartition(-probs, kth=router.top_k - 1, axis=-1)[..., : router.top_k]
+    top_k_weights = mx.take_along_axis(probs, top_k_indices, axis=-1)
+    top_k_weights = top_k_weights / mx.sum(top_k_weights, axis=-1, keepdims=True)
+    expert_scales = router.per_expert_scale[top_k_indices]
+    top_k_weights = top_k_weights * expert_scales
+    return top_k_weights, top_k_indices
+
+
 def _build_engine(model_dir, cache_size):
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     model_type = _detect_model_type(model_dir)
@@ -84,12 +125,156 @@ def _build_engine(model_dir, cache_size):
     return engine
 
 
+def run_shared_calibration_pass_gemma4(engine, prompts, tokens_per_prompt=20):
+    """Gemma 4 calibration pass — dense MLP + router/experts (not Qwen mlp.gate)."""
+    import mlx.core as mx
+    from mlx_lm.models.base import create_attention_mask
+    from .engine_gemma4 import run_expert_ffn_gemma4
+
+    model_dir = _engine_model_dir(engine)
+    config = json.load(open(os.path.join(model_dir, "config.json")))
+    num_layers = config["num_hidden_layers"]
+    num_experts = config["num_experts"]
+    args = engine.model.args
+
+    count = np.zeros((num_layers, num_experts), dtype=np.int32)
+    gate_sum = np.zeros((num_layers, num_experts), dtype=np.float64)
+    coact = np.zeros((num_layers, num_experts, num_experts), dtype=np.float32)
+    prev_layer_experts = {}
+    total_tokens = 0
+    eos_ids = _gemma4_eos_ids(engine.tokenizer)
+
+    first_global = next(
+        (i for i, lt in enumerate(args.layer_types) if lt == "full_attention"), 0
+    )
+    first_sliding = next(
+        (i for i, lt in enumerate(args.layer_types) if lt == "sliding_attention"), 0
+    )
+
+    def instrumented_forward(input_ids):
+        nonlocal prev_layer_experts
+        h = engine.model.model.embed_tokens(input_ids)
+        h = h * mx.array(args.hidden_size ** 0.5, dtype=h.dtype)
+        global_mask = create_attention_mask(h, engine.cache[first_global])
+        sliding_mask = create_attention_mask(
+            h, engine.cache[first_sliding], window_size=args.sliding_window
+        )
+        prev_layer_experts = {}
+
+        for i in range(num_layers):
+            layer = engine.model.model.layers[i]
+            mask = global_mask if args.layer_types[i] == "full_attention" else sliding_mask
+
+            residual = h
+            h = layer.input_layernorm(h)
+            h = layer.self_attn(h, mask, engine.cache[i])
+            h = layer.post_attention_layernorm(h)
+            h = residual + h
+            mx.eval(h)
+
+            residual = h
+            h = layer.pre_feedforward_layernorm(h)
+            dense_out = layer.mlp(h)
+
+            if layer.enable_moe_block:
+                h_dense = layer.post_feedforward_layernorm_1(dense_out)
+                B, L, D = residual.shape
+                residual_flat = residual.reshape(-1, D)
+                router_weights, router_indices = layer.router(residual_flat)
+                mx.eval(router_weights, router_indices)
+
+                active_ids = [int(e) for e in np.array(router_indices).flatten()]
+                gate_weights = [
+                    float(s) for s in np.array(router_weights.astype(mx.float32)).flatten()
+                ]
+                active_set = list(set(active_ids))
+                for eid, gw in zip(active_ids, gate_weights):
+                    count[i, eid] += 1
+                    gate_sum[i, eid] += gw
+                if i > 0 and (i - 1) in prev_layer_experts:
+                    for prev_eid in prev_layer_experts[i - 1]:
+                        for cur_eid in active_set:
+                            coact[i - 1, prev_eid, cur_eid] += 1
+                prev_layer_experts[i] = set(active_set)
+
+                if i + 1 < num_layers:
+                    engine.reader.prefetch_experts(i + 1, active_set)
+                expert_data = engine.reader.get_experts(i, active_set)
+                moe_input = layer.pre_feedforward_layernorm_2(residual_flat)
+                expert_out = run_expert_ffn_gemma4(
+                    moe_input.reshape(B, L, D),
+                    expert_data,
+                    router_indices.reshape(B, L, -1),
+                    router_weights.reshape(B, L, -1),
+                    per_expert_scale=engine.per_expert_scales.get(i),
+                )
+                h_moe = layer.post_feedforward_layernorm_2(expert_out)
+                h = h_dense + h_moe
+                h = layer.post_feedforward_layernorm(h)
+                del expert_data, expert_out
+            else:
+                h = layer.post_feedforward_layernorm(dense_out)
+
+            h = residual + h
+            h = h * layer.layer_scalar
+            mx.eval(h)
+            mx.clear_cache()
+
+        h = engine.model.model.norm(h)
+        return engine._apply_lm_head(h)
+
+    tok = engine.tokenizer
+    for pi, prompt in enumerate(prompts):
+        engine.reset_cache()
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            text = tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+            )
+        except Exception:
+            try:
+                text = tok.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            except Exception:
+                text = messages[-1]["content"]
+        tokens = tok.encode(text)
+        input_ids = mx.array([tokens])
+        logits = instrumented_forward(input_ids)
+        mx.eval(logits)
+        total_tokens += 1
+        for _ in range(tokens_per_prompt):
+            token = mx.argmax(logits[:, -1, :], axis=-1)
+            mx.eval(token)
+            tid = token.item()
+            if tid in eos_ids:
+                break
+            logits = instrumented_forward(token.reshape(1, 1))
+            mx.eval(logits)
+            total_tokens += 1
+        sys.stdout.write(f"\r  Calibration: prompt {pi+1}/{len(prompts)}, {total_tokens} tokens")
+        sys.stdout.flush()
+    print()
+
+    avg_gate = np.where(count > 0, gate_sum / np.maximum(count, 1), 0.0)
+    importance = (count * avg_gate).astype(np.float32)
+    for li in range(num_layers):
+        mx_val = importance[li].max()
+        if mx_val > 0:
+            importance[li] /= mx_val
+    dead_mask = importance < 0.01
+    return importance, dead_mask, coact
+
+
 def run_shared_calibration_pass(engine, prompts, tokens_per_prompt=20):
     """Single pass: records REAP scores AND co-activation matrix."""
+    model_dir = _engine_model_dir(engine)
+    if "gemma4" in _detect_model_type(model_dir):
+        return run_shared_calibration_pass_gemma4(engine, prompts, tokens_per_prompt)
+
     import mlx.core as mx
     from .engine import run_expert_ffn
     # Get model_dir from the engine's reader
-    model_dir = os.path.dirname(engine.reader.expert_dir)
     config = json.load(open(os.path.join(model_dir, "config.json")))
     num_layers = config["num_hidden_layers"]
     num_experts = config["num_experts"]
@@ -203,8 +388,134 @@ def run_shared_calibration_pass(engine, prompts, tokens_per_prompt=20):
     return importance, dead_mask, coact
 
 
+def _generate_with_bias_gemma4(engine, prompt, bias, max_tokens=40):
+    """Gemma 4 biased generation for routing-bias sweep."""
+    import mlx.core as mx
+    from mlx_lm.models.base import create_attention_mask
+    from .engine_gemma4 import run_expert_ffn_gemma4
+
+    model_dir = _engine_model_dir(engine)
+    config = json.load(open(os.path.join(model_dir, "config.json")))
+    num_experts = config["num_experts"]
+    args = engine.model.args
+    eos_ids = _gemma4_eos_ids(engine.tokenizer)
+
+    first_global = next(
+        (i for i, lt in enumerate(args.layer_types) if lt == "full_attention"), 0
+    )
+    first_sliding = next(
+        (i for i, lt in enumerate(args.layer_types) if lt == "sliding_attention"), 0
+    )
+
+    engine.reset_cache()
+    tok = engine.tokenizer
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        text = tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+        )
+    except Exception:
+        text = tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+    tokens = tok.encode(text)
+    input_ids = mx.array([tokens])
+
+    def biased_forward(input_ids):
+        h = engine.model.model.embed_tokens(input_ids)
+        h = h * mx.array(args.hidden_size ** 0.5, dtype=h.dtype)
+        global_mask = create_attention_mask(h, engine.cache[first_global])
+        sliding_mask = create_attention_mask(
+            h, engine.cache[first_sliding], window_size=args.sliding_window
+        )
+
+        for i in range(engine.num_layers):
+            layer = engine.model.model.layers[i]
+            mask = global_mask if args.layer_types[i] == "full_attention" else sliding_mask
+
+            residual = h
+            h = layer.input_layernorm(h)
+            h = layer.self_attn(h, mask, engine.cache[i])
+            h = layer.post_attention_layernorm(h)
+            h = residual + h
+            mx.eval(h)
+
+            residual = h
+            h = layer.pre_feedforward_layernorm(h)
+            dense_out = layer.mlp(h)
+
+            if layer.enable_moe_block:
+                h_dense = layer.post_feedforward_layernorm_1(dense_out)
+                B, L, D = residual.shape
+                residual_flat = residual.reshape(-1, D)
+                router_weights, router_indices = _gemma4_route(
+                    layer,
+                    residual_flat,
+                    layer_idx=i,
+                    reader=engine.reader,
+                    num_experts=num_experts,
+                    bias=bias,
+                )
+                mx.eval(router_weights, router_indices)
+                active_ids = list(set(int(e) for e in np.array(router_indices).flatten()))
+                engine.coact.record_layer(i, active_ids)
+                if engine.coact.ready and i + 1 < engine.num_layers:
+                    predicted = engine.coact.predict_next_layer(i, active_ids, top_k=6)
+                    if predicted:
+                        to_fetch = [
+                            eid
+                            for eid in predicted
+                            if engine.reader.lru and engine.reader.lru.get(i + 1, eid) is None
+                        ]
+                        if to_fetch:
+                            engine.reader.prefetch_experts(i + 1, to_fetch)
+                if i + 1 < engine.num_layers:
+                    engine.reader.prefetch_experts(i + 1, active_ids)
+                expert_data = engine.reader.get_experts(i, active_ids)
+                moe_input = layer.pre_feedforward_layernorm_2(residual_flat)
+                expert_out = run_expert_ffn_gemma4(
+                    moe_input.reshape(B, L, D),
+                    expert_data,
+                    router_indices.reshape(B, L, -1),
+                    router_weights.reshape(B, L, -1),
+                    per_expert_scale=engine.per_expert_scales.get(i),
+                )
+                h_moe = layer.post_feedforward_layernorm_2(expert_out)
+                h = h_dense + h_moe
+                h = layer.post_feedforward_layernorm(h)
+                del expert_data, expert_out
+            else:
+                h = layer.post_feedforward_layernorm(dense_out)
+
+            h = residual + h
+            h = h * layer.layer_scalar
+            mx.eval(h)
+            mx.clear_cache()
+
+        engine.coact.end_token()
+        h = engine.model.model.norm(h)
+        return engine._apply_lm_head(h)
+
+    logits = biased_forward(input_ids)
+    mx.eval(logits)
+    generated = []
+    for _ in range(max_tokens):
+        token = mx.argmax(logits[:, -1, :], axis=-1)
+        mx.eval(token)
+        tid = token.item()
+        if tid in eos_ids:
+            break
+        generated.append(tid)
+        logits = biased_forward(token.reshape(1, 1))
+        mx.eval(logits)
+    return generated, tok.decode(generated)
+
+
 def _generate_with_bias(engine, prompt, bias, max_tokens=40):
     """Generate with routing bias on raw logits. No REAP masking."""
+    if _is_gemma4_engine(engine):
+        return _generate_with_bias_gemma4(engine, prompt, bias, max_tokens)
+
     import mlx.core as mx
     from mlx_lm.models.base import create_attention_mask
     # Import run_expert_ffn from whichever engine module loaded this engine

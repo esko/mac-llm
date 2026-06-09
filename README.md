@@ -65,7 +65,7 @@ Nine JSON-serializable artifact types (user task summary, git diff summary, tool
 
 ## Model setup
 
-`mac-llm` does not download models for you. Install the runtime binary, fetch or preprocess a model, then point environment variables at the on-disk path.
+`mac-llm` does not download models for you. Install the runtime binary, fetch models (`hf download` for fast GGUF; `mlx-sniper download` for deep MoE), then point environment variables at the on-disk path.
 
 ### Recommended models (24 GB Mac Mini)
 
@@ -74,9 +74,10 @@ Start with one fast model and one deep model. Do not benchmark every variant upf
 | Target | Suggested model | Format | Typical resident RAM | Band | Notes |
 |--------|-----------------|--------|-------------------|------|-------|
 | `local_fast` | **Qwen3.5-9B** (or latest Qwen 9B/12B equivalent) | GGUF `Q4_K_M` | ~6–8 GB | Green | Primary everyday coding / summarization target |
-| `local_fast` (later) | Mellum2, Gemma 4 QAT | GGUF / MLX | TBD by benchmark | Green–Yellow | Evaluate only after the primary fast path works |
+| `local_fast` (alt) | **Gemma 4-12B-it** | GGUF `Q4_K_M` | ~8–10 GB | Green–Yellow | Alternative fast candidate for A/B vs Qwen3.5-9B |
 | `local_deep_moe` | **Qwen3.5-35B-A3B** | mlx-sniper preprocessed | ~9–12 GB active | Yellow | Primary deep target for planning / review / debugging |
 | `local_deep_moe` (fallback) | **Qwen3-30B-A3B** | mlx-sniper preprocessed | ~9–11 GB active | Yellow | Use if 35B is harder to fetch or preprocess |
+| `local_deep_moe` (alt) | **Gemma 4-26B-A4B** | mlx-sniper (`gemma4-26b`) | ~10–14 GB active | Yellow | Experimental MoE; `mlx-sniper download gemma4-26b` |
 
 Orange/red bands (>17 GB resident) require a recorded benchmark and explicit approval before production use. See [`docs/24GB_PROFILE_POLICY.md`](docs/24GB_PROFILE_POLICY.md).
 
@@ -106,22 +107,24 @@ llama-server --version
 
 ### 2. Download a fast GGUF model
 
-Use any trusted GGUF source (Hugging Face is typical). Pick a **Q4_K_M** (or similar) quant of a 9B-class instruct/coder model.
+The primary `local_fast` candidate is **Qwen3.5-9B** in **Q4_K_M** GGUF format (~5–6 GB on disk). Use a community conversion of [`Qwen/Qwen3.5-9B`](https://huggingface.co/Qwen/Qwen3.5-9B), or download a pre-quantized GGUF from Hugging Face.
 
 ```bash
-pip install huggingface_hub
+pip install huggingface_hub   # provides the `hf` CLI
+mkdir -p ~/models/local_fast
 
-# Example: download a Qwen 9B-class GGUF (check the model card for the exact file name)
-huggingface-cli download \
-  unsloth/Qwen2.5-Coder-7B-Instruct-GGUF \
-  Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+# Example: Qwen3.5-9B Q4_K_M (community GGUF converted from Qwen/Qwen3.5-9B)
+# Check the model card for the exact filename before running.
+hf download \
+  jc-builds/Qwen3.5-9B-Q4_K_M-GGUF \
+  Qwen3.5-9B-Q4_K_M.gguf \
   --local-dir ~/models/local_fast
 ```
 
-Replace the repo and filename with the **Qwen3.5-9B Q4_K_M** (or current 9B/12B) artifact you intend to standardize on. The path must be a single `.gguf` file.
+Other `Qwen3.5-9B` + `Q4_K_M` repos exist on Hugging Face; pick one and standardize on it. The path passed to `mac-llm` must be a **single `.gguf` file**, not a directory.
 
 ```bash
-export MAC_LLM_MODEL_LOCAL_FAST=~/models/local_fast/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+export MAC_LLM_MODEL_LOCAL_FAST=~/models/local_fast/Qwen3.5-9B-Q4_K_M.gguf
 ```
 
 ### 3. Install `mlx-sniper` (`local_deep_moe`)
@@ -141,23 +144,31 @@ Verify:
 mlx-sniper --help
 ```
 
-### 4. Preprocess a deep MoE model
+### 4. Download a deep MoE model
 
-MoE models must be **preprocessed once** before serving. This splits expert weights for SSD streaming and takes significant disk space.
+`mlx-sniper download` fetches from Hugging Face, preprocesses expert weights for SSD streaming, and runs quick calibration. This is a one-time step and needs significant disk space (~20–25 GB free for 35B-class models).
+
+List supported model names:
+
+```bash
+mlx-sniper download list
+```
+
+Download and prepare a model:
 
 ```bash
 mkdir -p ~/models
 
 # Primary candidate (pick one to start)
-mlx-sniper preprocess mlx-community/Qwen3.5-35B-A3B-4bit -o ~/models/qwen35-35b-a3b
+mlx-sniper download qwen3.5-35b -o ~/models/qwen35-35b-a3b
 
 # Fallback if the above is unavailable or too heavy
-# mlx-sniper preprocess mlx-community/Qwen3-30B-A3B-4bit -o ~/models/qwen3-30b-a3b
+# mlx-sniper download qwen3-30b -o ~/models/qwen3-30b-a3b
 ```
 
-Preprocessing downloads weights from Hugging Face and writes a local directory (~20–25 GB free disk recommended for 35B-class models).
+Re-calibrate later (optional): `mlx-sniper calibrate ~/models/qwen35-35b-a3b`
 
-Point `mac-llm` at the **preprocessed directory**, not the raw HF snapshot:
+Point `mac-llm` at the **sniper model directory** returned by download (not the raw HF cache):
 
 ```bash
 export MAC_LLM_MODEL_LOCAL_DEEP_MOE=~/models/qwen35-35b-a3b
@@ -238,10 +249,10 @@ mac-llm ask --role coding "Summarize the purpose of mac_llm/runtime/manager.py"
 
 ### Run a swap benchmark
 
-Proves start→prompt→stop twice with artifact output:
+Primary runtime proof — fast → deep → fast with artifact output:
 
 ```bash
-mac-llm bench swap --from local_fast --to local_fast
+mac-llm bench swap-sequence local_fast local_deep_moe local_fast
 ```
 
 See [Benchmarking](#benchmarking) for the full proof sequence, artifact format, and how to interpret results.
@@ -253,7 +264,7 @@ See [Benchmarking](#benchmarking) for the full proof sequence, artifact format, 
 | Variable | Used by | Purpose |
 |----------|---------|---------|
 | `MAC_LLM_MODEL_LOCAL_FAST` | `local_fast` | Path to a single `.gguf` file for `llama-server` |
-| `MAC_LLM_MODEL_LOCAL_DEEP_MOE` | `local_deep_moe` | Path to a **preprocessed** mlx-sniper model directory |
+| `MAC_LLM_MODEL_LOCAL_DEEP_MOE` | `local_deep_moe` | Path to an mlx-sniper model directory (`mlx-sniper download -o …`) |
 
 State and logs default to `~/.mac-llm/state/` and `~/.mac-llm/logs/`.
 
@@ -325,14 +336,11 @@ mac-llm runtime smoke local_fast --artifact-root /tmp/bench
 
 | Command | Description |
 |---------|-------------|
-| `mac-llm bench swap --from <t> --to <t>` | Two-cycle swap benchmark with artifacts |
-| `mac-llm bench swap-sequence <t1> <t2> ...` | Ordered multi-target sequence |
+| `mac-llm bench swap-sequence <t1> <t2> ...` | Ordered multi-target swap proof with artifacts |
+| `mac-llm bench swap --from local_fast --to local_fast` | M3 only: two lifecycle cycles on `local_fast` (both flags must match) |
 | `mac-llm bench kv --target <t> --prefix <name>` | Cold vs warm prompt-cache benchmark |
 
 ```bash
-# Fast → fast swap proof
-mac-llm bench swap --from local_fast --to local_fast
-
 # Primary runtime proof: fast → deep → fast
 mac-llm bench swap-sequence local_fast local_deep_moe local_fast
 
@@ -420,17 +428,7 @@ mac-llm runtime smoke local_deep_moe
 mac-llm runtime stop local_deep_moe
 ```
 
-#### Step 2 — Fast→fast swap (lifecycle proof)
-
-Runs two full start→prompt→stop cycles on `local_fast`. Verifies managed lifecycle + artifact writer + **no orphan** after success or failure:
-
-```bash
-mac-llm bench swap --from local_fast --to local_fast
-```
-
-Currently requires `local_fast` for both `--from` and `--to`. This is the minimum bar before multi-target swaps.
-
-#### Step 3 — Fast→deep→fast swap-sequence (primary runtime proof)
+#### Step 2 — Fast→deep→fast swap-sequence (primary runtime proof)
 
 The north-star scenario from [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md):
 
@@ -439,6 +437,16 @@ mac-llm bench swap-sequence local_fast local_deep_moe local_fast
 ```
 
 Each step: ensure inactive → start → fixed prompt → stop. Review per-step timings and orphan checks in `summary.md`.
+
+#### Step 3 — Fast→fast lifecycle (optional, M3)
+
+If you only have `local_fast` configured, or want a minimal lifecycle check before the full sequence:
+
+```bash
+mac-llm bench swap --from local_fast --to local_fast
+```
+
+Both `--from` and `--to` must be `local_fast` (same target twice — not a cross-target swap). Runs two start→prompt→stop cycles and verifies **no orphan** after success or failure.
 
 #### Step 4 — Prompt-cache benchmark (optional)
 
@@ -450,7 +458,62 @@ mac-llm bench kv --target local_deep_moe --prefix repo-review
 
 Requires KV runtime integration; fails clearly with an artifact when the runtime layer is unavailable.
 
-### Example: full local proof session
+### Helper scripts (A/B model comparison)
+
+Use these to benchmark Qwen 3.5 (baseline) vs **Gemma 4** (alternative), switch env vars, rerun, and compare.
+
+| Slot | Qwen 3.5 (baseline) | Gemma 4 (candidate) | Notes |
+|------|---------------------|---------------------|-------|
+| `local_fast` | **Qwen3.5-9B** Q4_K_M (~6 GB) | **Gemma 4-12B-it** Q4_K_M (~8–10 GB) | Similar dense instruct tier; both fit green–yellow on 24 GB |
+| `local_deep_moe` | **Qwen3.5-35B-A3B** | **Gemma 4-26B-A4B** | `mlx-sniper download gemma4-26b` (marked experimental) |
+
+**Download Gemma 4 models (example):**
+
+```bash
+mkdir -p ~/models/gemma4/{local_fast,deep}
+
+# Fast — check the model card for the exact Q4_K_M filename
+hf download unsloth/gemma-4-12b-it-GGUF --include "*Q4_K_M*" \
+  --local-dir ~/models/gemma4/local_fast
+
+# Deep — download, preprocess, and quick-calibrate via mlx-sniper
+mlx-sniper download gemma4-26b -o ~/models/gemma4/deep/gemma4-26b
+
+# Re-calibrate after updating mlx-sniper (Gemma 4 uses a separate calibration path)
+mlx-sniper calibrate ~/models/gemma4/deep/gemma4-26b --quick
+```
+
+Use a recent `llama-server` build with Gemma 4 support. If smoke output looks wrong, your GGUF may need `--jinja` / `--chat-template gemma` flags (not yet wired into `mac-llm runtime render`).
+
+The tokenizer `fix_mistral_regex` message is a warning only. If `calibrate` fails on `DenseMLP` / `gate`, reinstall mlx-sniper from the vendored `cli-agent` tree (Gemma 4 calibration is not Qwen-compatible).
+
+**Run the full suite** (archives under `benchmarks/comparison/<label>/`):
+
+```bash
+# --- Qwen 3.5 baseline ---
+export MAC_LLM_MODEL_LOCAL_FAST=~/models/qwen35/local_fast/Qwen3.5-9B-Q4_K_M.gguf
+export MAC_LLM_MODEL_LOCAL_DEEP_MOE=~/models/qwen35/deep/qwen35-35b-a3b
+./benchmarks/run-suite.sh qwen35
+
+# --- Gemma 4 candidate (both slots) ---
+export MAC_LLM_MODEL_LOCAL_FAST=~/models/gemma4/local_fast/<gemma-4-12b-it-Q4_K_M.gguf>
+export MAC_LLM_MODEL_LOCAL_DEEP_MOE=~/models/gemma4/deep/gemma4-26b
+./benchmarks/run-suite.sh gemma4
+```
+
+Compare `local_fast` and `local_deep_moe` smoke rows plus all three swap-sequence steps. Check memory band and orphan status before promoting either stack.
+
+Options: `--skip-kv` (KV bench may be unavailable), `--skip-swap` (skip M3 lifecycle bench).
+
+**Compare two archives** (smoke + swap-sequence metrics side by side):
+
+```bash
+./benchmarks/compare.sh qwen35 gemma4
+```
+
+Each archive includes `manifest.json` with the model paths used for that run.
+
+### Example: full local proof session (manual)
 
 ```bash
 cd mac-llm
@@ -460,8 +523,7 @@ source .venv/bin/activate
 mac-llm runtime start local_fast && mac-llm runtime smoke local_fast && mac-llm runtime stop local_fast
 mac-llm runtime start local_deep_moe && mac-llm runtime smoke local_deep_moe && mac-llm runtime stop local_deep_moe
 
-# 2. Swap proofs
-mac-llm bench swap --from local_fast --to local_fast
+# 2. Swap proof (primary)
 mac-llm bench swap-sequence local_fast local_deep_moe local_fast
 
 # 3. Review artifacts
@@ -486,8 +548,8 @@ A target graduates from “candidate” to “configured default” only after: 
 | Command | Milestone | Purpose |
 |---------|-----------|---------|
 | `mac-llm runtime smoke <target>` | Per-target health | API + inference smoke + artifact |
-| `mac-llm bench swap --from local_fast --to local_fast` | M3 | Managed swap + orphan guarantee |
 | `mac-llm bench swap-sequence local_fast local_deep_moe local_fast` | M5 | Primary fast→deep→fast proof |
+| `mac-llm bench swap --from local_fast --to local_fast` | M3 | Optional: two `local_fast` lifecycle cycles (flags must match) |
 | `mac-llm bench kv --target local_deep_moe --prefix <name>` | M6 | Cold vs warm cache comparison |
 
 All commands are also listed under [Benchmark commands](#benchmark-commands) in the command reference.
@@ -546,7 +608,7 @@ tests/             # Pytest suite
 - **External agents disabled by default** — consultation paths are dry-run / policy-gated until explicitly enabled in config.
 - **KV bench CLI** — requires full KV runtime runner integration; fails clearly with an artifact when the runtime layer is unavailable.
 - **Host binaries required** — `llama-server` and `mlx-sniper` must be installed and on `PATH`; see [Model setup](#model-setup).
-- **Models are manual** — download GGUF or preprocess MoE weights yourself; `mac-llm` only references paths via env vars.
+- **Models are manual** — `hf download` for fast GGUF; `mlx-sniper download` for deep MoE; `mac-llm` only references paths via env vars.
 
 ---
 
