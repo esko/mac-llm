@@ -11,6 +11,7 @@ from mac_llm import __version__
 from mac_llm.bench.artifacts import BenchmarkArtifactWriter
 from mac_llm.bench.kv import run_kv_benchmark_cli
 from mac_llm.bench.swap import run_swap_benchmark
+from mac_llm.bench.swap_sequence import run_swap_sequence_benchmark
 from mac_llm.roles.ask import AskError, run_ask
 from mac_llm.roles.config import ASK_CLI_ROLES
 from mac_llm.roles.select import UnknownRoleError, select_target
@@ -163,6 +164,18 @@ def _cmd_bench_swap(from_target_id: str, to_target_id: str) -> int:
         from_target_id=from_target_id,
         to_target_id=to_target_id,
     )
+    rel_dir = result.run_dir.relative_to(Path.cwd())
+    if result.ok:
+        print(f"benchmark completed; artifacts in {rel_dir}")
+        return 0
+
+    print(result.message, file=sys.stderr)
+    print(f"failure artifact written to {rel_dir}", file=sys.stderr)
+    return 1
+
+
+def _cmd_bench_swap_sequence(target_ids: list[str]) -> int:
+    result = run_swap_sequence_benchmark(target_ids=target_ids)
     rel_dir = result.run_dir.relative_to(Path.cwd())
     if result.ok:
         print(f"benchmark completed; artifacts in {rel_dir}")
@@ -352,6 +365,16 @@ def main(argv: list[str] | None = None) -> None:
         help="Destination runtime target id",
     )
 
+    swap_sequence_parser = bench_subparsers.add_parser(
+        "swap-sequence",
+        help="Run an ordered start→prompt→stop sequence across runtime targets",
+    )
+    swap_sequence_parser.add_argument(
+        "targets",
+        nargs="+",
+        help="Ordered runtime target ids (e.g. local_fast local_deep_moe local_fast)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "ask":
@@ -382,6 +405,8 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_bench_kv(args.target, args.prefix))
         if args.bench_command == "swap":
             raise SystemExit(_cmd_bench_swap(args.from_target, args.to_target))
+        if args.bench_command == "swap-sequence":
+            raise SystemExit(_cmd_bench_swap_sequence(args.targets))
 
     parser.print_help()
 
