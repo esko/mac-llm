@@ -170,5 +170,6 @@ class ToolBroker:
                 self.repo_root,
                 args,
                 resolved_paths=resolved_paths,
+                denied_segments=self.denied_path_segments,
             )
         raise ToolBrokerError(f"tool not implemented: {tool}")

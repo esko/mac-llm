@@ -238,3 +238,24 @@ def test_broker_has_no_shell_tool(broker: ToolBroker) -> None:
             requester_target="local_fast",
             payload={"tool": "run_shell", "args": {"command": "echo hi"}},
         )
+
+
+def test_search_text_does_not_leak_denied_files(broker: ToolBroker) -> None:
+    result = broker.dispatch(
+        role="review",
+        requester_target="local_fast",
+        payload={"tool": "search_text", "args": {"pattern": "SECRET"}},
+    )
+    assert result.status == "ok"
+    assert ".env" not in result.output
+    assert "SECRET" not in result.output
+
+
+def test_list_files_recursive_excludes_denied_files(broker: ToolBroker) -> None:
+    result = broker.dispatch(
+        role="coding",
+        requester_target="local_fast",
+        payload={"tool": "list_files", "args": {"path": ".", "recursive": True}},
+    )
+    assert result.status == "ok"
+    assert ".env" not in result.output

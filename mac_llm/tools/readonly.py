@@ -34,7 +34,17 @@ def read_file_range(repo_root: Path, args: dict[str, Any], file_path: Path) -> s
     return "\n".join(selected) + ("\n" if selected else "")
 
 
-def search_text(repo_root: Path, args: dict[str, Any], search_root: Path) -> str:
+def _path_is_denied(rel_path: str, denied_segments: frozenset[str]) -> bool:
+    """Return True if any segment of a repo-relative path is denied."""
+    return any(part in denied_segments for part in Path(rel_path).parts)
+
+
+def search_text(
+    repo_root: Path,
+    args: dict[str, Any],
+    search_root: Path,
+    denied_segments: frozenset[str] = frozenset(),
+) -> str:
     pattern = re.compile(args["pattern"])
     matches: list[str] = []
     paths = (
@@ -43,11 +53,13 @@ def search_text(repo_root: Path, args: dict[str, Any], search_root: Path) -> str
         else sorted(p for p in search_root.rglob("*") if p.is_file())
     )
     for path in paths:
+        rel = path.relative_to(repo_root).as_posix()
+        if _path_is_denied(rel, denied_segments):
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        rel = path.relative_to(repo_root).as_posix()
         for line_no, line in enumerate(text.splitlines(), start=1):
             if pattern.search(line):
                 matches.append(f"{rel}:{line_no}:{line}")
@@ -62,22 +74,30 @@ def git_diff(repo_root: Path, args: dict[str, Any]) -> str:
     return _run_git(repo_root, "diff")
 
 
-def list_files(repo_root: Path, args: dict[str, Any], list_root: Path) -> str:
+def list_files(
+    repo_root: Path,
+    args: dict[str, Any],
+    list_root: Path,
+    denied_segments: frozenset[str] = frozenset(),
+) -> str:
     recursive = bool(args.get("recursive", False))
     if list_root.is_file():
         return list_root.relative_to(repo_root).as_posix() + "\n"
     if recursive:
-        paths = sorted(
+        candidates = (
             p.relative_to(repo_root).as_posix()
             for p in list_root.rglob("*")
             if p.is_file()
         )
     else:
-        paths = sorted(
+        candidates = (
             p.relative_to(repo_root).as_posix()
             for p in list_root.iterdir()
             if p.is_file()
         )
+    paths = sorted(
+        rel for rel in candidates if not _path_is_denied(rel, denied_segments)
+    )
     return "\n".join(paths) + ("\n" if paths else "")
 
 
@@ -96,6 +116,7 @@ def execute_read_only_tool(
     args: dict[str, Any],
     *,
     resolved_paths: dict[str, Path],
+    denied_segments: frozenset[str] = frozenset(),
 ) -> str:
     """Execute a registered read-only tool and return raw output."""
     handler = _READ_ONLY_HANDLERS.get(tool)
@@ -105,7 +126,9 @@ def execute_read_only_tool(
     if tool == "read_file_range":
         return handler(repo_root, args, resolved_paths["file"])
     if tool == "search_text":
-        return handler(repo_root, args, resolved_paths.get("path", repo_root))
+        return handler(
+            repo_root, args, resolved_paths.get("path", repo_root), denied_segments
+        )
     if tool == "list_files":
-        return handler(repo_root, args, resolved_paths["path"])
+        return handler(repo_root, args, resolved_paths["path"], denied_segments)
     return handler(repo_root, args)
