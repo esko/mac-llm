@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from mac_llm import __version__
+from mac_llm.bench.swap import run_swap_benchmark
 from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager, render_start_command
 from mac_llm.roles.select import UnknownRoleError, select_target
 from mac_llm.runtime.smoke import run_smoke
@@ -130,6 +131,21 @@ def _cmd_runtime_health(target_id: str) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_bench_swap(from_target_id: str, to_target_id: str) -> int:
+    result = run_swap_benchmark(
+        from_target_id=from_target_id,
+        to_target_id=to_target_id,
+    )
+    rel_dir = result.run_dir.relative_to(Path.cwd())
+    if result.ok:
+        print(f"benchmark completed; artifacts in {rel_dir}")
+        return 0
+
+    print(result.message, file=sys.stderr)
+    print(f"failure artifact written to {rel_dir}", file=sys.stderr)
+    return 1
+
+
 def _cmd_runtime_orphan_check(target_id: str) -> int:
     try:
         target = get_target(target_id)
@@ -242,6 +258,26 @@ def main(argv: list[str] | None = None) -> None:
         help="Directory root for benchmarks/runs artifacts (default: current directory)",
     )
 
+    bench_parser = subparsers.add_parser("bench", help="Benchmark commands")
+    bench_subparsers = bench_parser.add_subparsers(dest="bench_command")
+
+    swap_parser = bench_subparsers.add_parser(
+        "swap",
+        help="Run a fast→fast swap benchmark with artifact output",
+    )
+    swap_parser.add_argument(
+        "--from",
+        dest="from_target",
+        required=True,
+        help="Source runtime target id",
+    )
+    swap_parser.add_argument(
+        "--to",
+        dest="to_target",
+        required=True,
+        help="Destination runtime target id",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "role":
@@ -263,6 +299,10 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_runtime_orphan_check(args.target_id))
         if args.runtime_command == "smoke":
             raise SystemExit(_cmd_runtime_smoke(args.target_id, args.artifact_root))
+
+    if args.command == "bench":
+        if args.bench_command == "swap":
+            raise SystemExit(_cmd_bench_swap(args.from_target, args.to_target))
 
     parser.print_help()
 
