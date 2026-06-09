@@ -25,3 +25,14 @@ def test_cli_help() -> None:
         text=True,
     )
     assert "mac-llm" in result.stdout.lower() or "mac_llm" in result.stdout.lower()
+
+
+def test_cli_bench_kv_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "mac_llm.cli", "bench", "kv", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--target" in result.stdout
+    assert "--prefix" in result.stdout
