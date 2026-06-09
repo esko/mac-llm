@@ -177,8 +177,8 @@ def run_server(model_dir, host="127.0.0.1", port=11434):
     print("  Loading model in background (curl /api/tags works immediately)...")
     print(f"  Test: curl http://localhost:{port}/api/tags")
     print(
-        "  Chat: curl http://localhost:{port}/api/chat -d "
-        '\'{"model":"qwen3.5-35b","messages":[{"role":"user","content":"hello"}]}\''
+        f"  Chat: curl http://localhost:{port}/api/chat -d "
+        f"'{{\"model\":\"{_model_name}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hello\"}}]}}'"
     )
     print()
 
