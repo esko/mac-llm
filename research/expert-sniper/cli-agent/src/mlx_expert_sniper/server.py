@@ -56,11 +56,10 @@ def _get_engine():
         return _engine
 
 
-def _chat_stream(engine, prompt, max_tokens=200):
-    """Generator yielding token strings for one user prompt."""
+def _chat_stream(engine, messages, max_tokens=200):
+    """Generator yielding token strings for a chat message list."""
     from .generate import generate_stream
 
-    messages = [{"role": "user", "content": prompt}]
     yield from generate_stream(engine, messages, bias=_bias, max_tokens=max_tokens)
 
 
@@ -92,9 +91,11 @@ class OllamaHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(content_len))
 
         if "messages" in body:
-            prompt = body["messages"][-1]["content"]
+            messages = body["messages"]
+            prompt_preview = messages[-1].get("content", "")
         else:
-            prompt = body.get("prompt", "hello")
+            prompt_preview = body.get("prompt", "hello")
+            messages = [{"role": "user", "content": prompt_preview}]
 
         stream = body.get("stream", True)
         max_tokens = body.get("options", {}).get("num_predict", 200)
@@ -105,33 +106,45 @@ class OllamaHandler(BaseHTTPRequestHandler):
             self._json_response({"error": str(exc)}, status=503)
             return
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.end_headers()
+        if stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+
         t0 = time.time()
         total_tokens = 0
         full_response = ""
 
-        for token_text in _chat_stream(engine, prompt, max_tokens=max_tokens):
+        for token_text in _chat_stream(engine, messages, max_tokens=max_tokens):
             total_tokens += 1
             full_response += token_text
             if stream:
-                self._ndjson({"model": _model_name,
-                              "message": {"role": "assistant", "content": token_text},
-                              "done": False})
+                self._ndjson({
+                    "model": _model_name,
+                    "message": {"role": "assistant", "content": token_text},
+                    "done": False,
+                })
 
         elapsed = time.time() - t0
         done = {
             "model": _model_name,
-            "message": {"role": "assistant", "content": "" if stream else full_response},
+            "message": {
+                "role": "assistant",
+                "content": "" if stream else full_response,
+            },
             "done": True,
             "total_duration": int(elapsed * 1e9),
             "eval_count": total_tokens,
             "eval_duration": int(elapsed * 1e9),
         }
-        self._ndjson(done)
+
+        if stream:
+            self._ndjson(done)
+        else:
+            self._json_response(done)
+
         tps = total_tokens / elapsed if elapsed > 0 else 0
-        print(f"  [{total_tokens} tok, {tps:.1f} tok/s, {elapsed:.1f}s] {prompt[:40]}")
+        print(f"  [{total_tokens} tok, {tps:.1f} tok/s, {elapsed:.1f}s] {prompt_preview[:40]}")
 
     def _json_response(self, data, *, status=200):
         self.send_response(status)

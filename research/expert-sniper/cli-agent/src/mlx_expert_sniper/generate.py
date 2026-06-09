@@ -161,31 +161,39 @@ def generate_stream(engine, messages, bias=0.0, max_tokens=200):
         mx.eval(logits)
 
 
+def _gemma4_chat_text(tok, messages):
+    """Format messages for Gemma 4 instruct (disable thinking for direct replies)."""
+    try:
+        return tok.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+    except Exception:
+        try:
+            return tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception:
+            return messages[-1]["content"]
+
+
 def _generate_stream_gemma4(engine, messages, max_tokens=200):
     """Generator for Gemma 4 — uses engine's own forward pass."""
     import mlx.core as mx
+    from .calibrate import _gemma4_eos_ids
 
     engine.reset_cache()
     tok = engine.tokenizer
-    try:
-        text = tok.apply_chat_template(messages, tokenize=False,
-                                        add_generation_prompt=True)
-    except Exception:
-        text = messages[-1]["content"]
+    text = _gemma4_chat_text(tok, messages)
     tokens = tok.encode(text)
     input_ids = mx.array([tokens])
 
     logits = engine.forward(input_ids)
     mx.eval(logits)
 
-    # Gemma 4 EOS tokens
-    eos_ids = set()
-    if hasattr(tok, 'eos_token_id'):
-        if isinstance(tok.eos_token_id, list):
-            eos_ids.update(tok.eos_token_id)
-        elif tok.eos_token_id is not None:
-            eos_ids.add(tok.eos_token_id)
-    eos_ids.update({1, 106, 212})  # Gemma 4 EOS tokens
+    eos_ids = _gemma4_eos_ids(tok)
 
     for _ in range(max_tokens):
         token = mx.argmax(logits[:, -1, :], axis=-1)
