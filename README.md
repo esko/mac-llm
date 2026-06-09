@@ -263,8 +263,9 @@ See [Benchmarking](#benchmarking) for the full proof sequence, artifact format, 
 
 | Variable | Used by | Purpose |
 |----------|---------|---------|
-| `MAC_LLM_MODEL_LOCAL_FAST` | `local_fast` | Path to a single `.gguf` file for `llama-server` |
+| `MAC_LLM_MODEL_LOCAL_FAST` | `local_fast` | Path to a single `.gguf` file for `llama-server` (use absolute paths; `~` is not expanded) |
 | `MAC_LLM_MODEL_LOCAL_DEEP_MOE` | `local_deep_moe` | Path to an mlx-sniper model directory (`mlx-sniper download -o …`) |
+| `MAC_LLM_COMPLETION_TIMEOUT` | `ask`, completions | HTTP timeout in seconds for chat completions (default: `120`) |
 
 State and logs default to `~/.mac-llm/state/` and `~/.mac-llm/logs/`.
 

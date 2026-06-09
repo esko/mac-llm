@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +14,19 @@ from urllib.parse import urlparse
 from mac_llm.runtime.target import RuntimeTarget
 
 PostJsonFn = Callable[[str, dict[str, Any]], dict[str, Any]]
+
+DEFAULT_COMPLETION_TIMEOUT_S = 120.0
+DEFAULT_MAX_TOKENS = 512
+
+
+def _completion_timeout_seconds() -> float:
+    raw = os.environ.get("MAC_LLM_COMPLETION_TIMEOUT")
+    if raw is None or raw == "":
+        return DEFAULT_COMPLETION_TIMEOUT_S
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_COMPLETION_TIMEOUT_S
 
 
 @dataclass(frozen=True)
@@ -38,20 +52,29 @@ def run_completion(
     target: RuntimeTarget,
     prompt: str,
     model: str = "default",
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     post_json: PostJsonFn | None = None,
+    timeout_seconds: float | None = None,
 ) -> CompletionResult:
     """Run a minimal OpenAI-compatible chat completion against a target."""
     if post_json is None:
         post_json = _default_post_json
+    if timeout_seconds is None:
+        timeout_seconds = _completion_timeout_seconds()
 
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
+        "max_tokens": max_tokens,
     }
     started = time.perf_counter()
     try:
-        response = post_json(completion_url_for_target(target), payload)
+        response = post_json(
+            completion_url_for_target(target),
+            payload,
+            timeout_seconds=timeout_seconds,
+        )
     except urllib.error.URLError as exc:
         return CompletionResult(ok=False, text=None, error=str(exc.reason or exc))
     except TimeoutError:
@@ -100,7 +123,12 @@ def run_completion(
     )
 
 
-def _default_post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _default_post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = DEFAULT_COMPLETION_TIMEOUT_S,
+) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -108,7 +136,7 @@ def _default_post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         raw = response.read().decode("utf-8")
     parsed = json.loads(raw)
     if not isinstance(parsed, dict):
