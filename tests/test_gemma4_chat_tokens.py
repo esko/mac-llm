@@ -16,6 +16,7 @@ sys.path.insert(0, str(CLI_AGENT_SRC))
 
 from mlx_expert_sniper.generate import (
     _gemma4_chat_tokens,
+    _gemma4_finalize_generation_prompt,
     _gemma4_manual_chat_text,
     _gemma4_normalize_messages,
     _gemma4_should_yield,
@@ -39,7 +40,15 @@ def test_gemma4_manual_chat_text_uses_official_generation_prime() -> None:
 
     assert text.startswith("<bos>")
     assert "<|turn>user\nSay hello in one sentence." in text
-    assert text.endswith("<|turn>model\n<|channel>thought\n ")
+    assert text.endswith("<|turn>model\n<|channel>thought\n<|channel|>\n")
+
+
+def test_gemma4_finalize_generation_prompt_closes_thinking_channel() -> None:
+    raw = "<bos><|turn>user\nHi \n<|turn>model\n<|channel>thought\n "
+    finalized = _gemma4_finalize_generation_prompt(raw)
+
+    assert finalized.endswith("<|channel>thought\n<|channel|>\n")
+    assert _gemma4_finalize_generation_prompt(finalized) == finalized
 
 
 def test_gemma4_chat_tokens_encodes_full_prompt() -> None:

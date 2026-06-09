@@ -181,7 +181,10 @@ def generate_stream(engine, messages, bias=0.0, max_tokens=200):
         mx.eval(logits)
 
 
-_GEMMA4_GENERATION_PRIME = "<|turn>model\n<|channel>thought\n "
+_GEMMA4_CHANNEL_CLOSE = "<|channel|>"
+_GEMMA4_GENERATION_PRIME = (
+    f"<|turn>model\n<|channel>thought\n{_GEMMA4_CHANNEL_CLOSE}\n"
+)
 _GEMMA4_CONTROL_MARKERS = (
     "<|channel>",
     "<channel|>",
@@ -192,6 +195,22 @@ _GEMMA4_CONTROL_MARKERS = (
     "<bos>",
     "<eos>",
 )
+
+
+def _gemma4_finalize_generation_prompt(text: str) -> str:
+    """Close the empty-thinking block in the prompt so the model answers immediately."""
+    if "<|channel>thought" not in text:
+        return text
+    if _GEMMA4_CHANNEL_CLOSE in text or "<channel|>" in text:
+        return text
+    return text.rstrip() + f"\n{_GEMMA4_CHANNEL_CLOSE}\n"
+
+
+def _gemma4_decode_token(tok, tid: int) -> str:
+    try:
+        return tok.decode([tid], skip_special_tokens=True)
+    except TypeError:
+        return tok.decode([tid])
 
 
 def _gemma4_should_yield(chunk: str) -> bool:
@@ -262,6 +281,7 @@ def _gemma4_chat_tokens(tok, messages: list[dict]) -> list[int]:
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
+            text = _gemma4_finalize_generation_prompt(text)
             return _gemma4_encode_text(tok, text)
         except Exception:
             pass
@@ -387,7 +407,7 @@ def _generate_stream_gemma4(engine, messages, bias=0.0, max_tokens=200):
         tid = token.item()
         if tid in eos_ids:
             break
-        chunk = tok.decode([tid])
+        chunk = _gemma4_decode_token(tok, tid)
         if any(st in chunk for st in STOP_TOKENS):
             break
         if _gemma4_should_yield(chunk):
@@ -417,7 +437,7 @@ def _gemma4_sample_tokens(
     trace: list[dict] = []
     for _ in range(max_tokens):
         tid = int(mx.argmax(logits[:, -1, :], axis=-1).item())
-        decoded = tok.decode([tid])
+        decoded = _gemma4_decode_token(tok, tid)
         trace.append({
             "id": tid,
             "text": decoded,
@@ -444,7 +464,7 @@ def probe_gemma4_generation(engine, messages, *, bias: float = 0.0) -> dict:
     logits = _gemma4_forward(engine, mx.array([tokens]), bias=bias)
     mx.eval(logits)
     first_tid = int(mx.argmax(logits[:, -1, :], axis=-1).item())
-    first_decoded = tok.decode([first_tid])
+    first_decoded = _gemma4_decode_token(tok, first_tid)
 
     trace = _gemma4_sample_tokens(engine, messages, bias=bias)
     visible = "".join(entry["text"] for entry in trace if entry["yielded"])
