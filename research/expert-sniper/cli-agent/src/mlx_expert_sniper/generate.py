@@ -182,6 +182,29 @@ def generate_stream(engine, messages, bias=0.0, max_tokens=200):
 
 
 _GEMMA4_GENERATION_PRIME = "<|turn>model\n<|channel>thought\n "
+_GEMMA4_CONTROL_MARKERS = (
+    "<|channel>",
+    "<channel|>",
+    "<|channel>thought",
+    "<|turn>",
+    "<|think|>",
+    "<|tool",
+    "<bos>",
+    "<eos>",
+)
+
+
+def _gemma4_should_yield(chunk: str) -> bool:
+    """Return False for Gemma 4 structural/control tokens that are not user text."""
+    if not chunk:
+        return False
+    stripped = chunk.strip()
+    if not stripped:
+        return False
+    for marker in _GEMMA4_CONTROL_MARKERS:
+        if marker in chunk or stripped == marker:
+            return False
+    return True
 
 
 def _gemma4_encode_text(tok, text: str) -> list[int]:
@@ -367,9 +390,45 @@ def _generate_stream_gemma4(engine, messages, bias=0.0, max_tokens=200):
         chunk = tok.decode([tid])
         if any(st in chunk for st in STOP_TOKENS):
             break
-        yield chunk
+        if _gemma4_should_yield(chunk):
+            yield chunk
         logits = _gemma4_forward(engine, token.reshape(1, 1), bias=bias)
         mx.eval(logits)
+
+
+def _gemma4_sample_tokens(
+    engine,
+    messages,
+    *,
+    bias: float = 0.0,
+    max_tokens: int = 24,
+) -> list[dict]:
+    """Generate a short token trace for diagnostics."""
+    import mlx.core as mx
+
+    tok = engine.tokenizer
+    tokens = _gemma4_chat_tokens(tok, messages)
+    eos_ids = _gemma4_generation_stop_ids(tok)
+
+    engine.reset_cache()
+    logits = _gemma4_forward(engine, mx.array([tokens]), bias=bias)
+    mx.eval(logits)
+
+    trace: list[dict] = []
+    for _ in range(max_tokens):
+        tid = int(mx.argmax(logits[:, -1, :], axis=-1).item())
+        decoded = tok.decode([tid])
+        trace.append({
+            "id": tid,
+            "text": decoded,
+            "is_stop": tid in eos_ids,
+            "yielded": _gemma4_should_yield(decoded),
+        })
+        if tid in eos_ids:
+            break
+        logits = _gemma4_forward(engine, mx.array([[tid]]), bias=bias)
+        mx.eval(logits)
+    return trace
 
 
 def probe_gemma4_generation(engine, messages, *, bias: float = 0.0) -> dict:
@@ -387,6 +446,9 @@ def probe_gemma4_generation(engine, messages, *, bias: float = 0.0) -> dict:
     first_tid = int(mx.argmax(logits[:, -1, :], axis=-1).item())
     first_decoded = tok.decode([first_tid])
 
+    trace = _gemma4_sample_tokens(engine, messages, bias=bias)
+    visible = "".join(entry["text"] for entry in trace if entry["yielded"])
+
     return {
         "chat_template_set": bool(getattr(tok, "chat_template", None)),
         "prompt_tokens": len(tokens),
@@ -395,5 +457,8 @@ def probe_gemma4_generation(engine, messages, *, bias: float = 0.0) -> dict:
         "first_token_id": first_tid,
         "first_token_text": first_decoded,
         "first_token_is_stop": first_tid in eos_ids,
+        "first_token_yielded": _gemma4_should_yield(first_decoded),
         "stop_ids": sorted(eos_ids),
+        "sample_tokens": trace,
+        "visible_text": visible,
     }

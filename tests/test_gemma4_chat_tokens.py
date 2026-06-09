@@ -18,6 +18,7 @@ from mlx_expert_sniper.generate import (
     _gemma4_chat_tokens,
     _gemma4_manual_chat_text,
     _gemma4_normalize_messages,
+    _gemma4_should_yield,
 )
 
 
@@ -60,3 +61,9 @@ def test_gemma4_chat_tokens_folds_system_into_user() -> None:
 
     assert "Be brief.\n\nHi" in text
     assert "<|turn>user\nBe brief.\n\nHi" in text
+
+
+def test_gemma4_should_yield_skips_channel_markers() -> None:
+    assert _gemma4_should_yield("Hello") is True
+    assert _gemma4_should_yield("<channel|>") is False
+    assert _gemma4_should_yield("<|channel>thought") is False
