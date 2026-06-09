@@ -66,13 +66,21 @@ def _chat_stream(engine, messages, max_tokens=200):
 class OllamaHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/tags":
+            status = "ready" if _engine is not None else "loading"
+            if _load_error is not None:
+                status = "error"
             self._json_response({
                 "models": [{
                     "name": _model_name,
                     "model": _model_name,
                     "size": 0,
-                    "details": {"family": _model_type, "parameter_size": "MoE",
-                                "quantization_level": "sniper"},
+                    "details": {
+                        "family": _model_type,
+                        "parameter_size": "MoE",
+                        "quantization_level": "sniper",
+                        "status": status,
+                        "load_error": _load_error,
+                    },
                 }]
             })
         elif self.path in ("/api/version", "/"):
@@ -165,8 +173,8 @@ def _preload_engine() -> None:
     try:
         _get_engine()
         print("  Model ready for chat.", flush=True)
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:
+        print(f"  Model preload failed: {exc}", flush=True, file=sys.stderr)
 
 
 def run_server(model_dir, host="127.0.0.1", port=11434):

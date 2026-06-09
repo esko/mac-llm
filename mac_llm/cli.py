@@ -90,6 +90,17 @@ def _cmd_runtime_start(target_id: str) -> int:
         return 1
 
     print(f"started pid {state.pid} on port {state.port}")
+    print(f"log: {target.log_path}")
+    if target.runtime_type == "mlx_sniper":
+        print(
+            "deep model loads in background (often 2–5+ min on first start); "
+            "do not stop until the log shows 'Model ready for chat'"
+        )
+        print(f"  tail -f {target.log_path}")
+        print(
+            f"  curl http://127.0.0.1:{state.port}/api/tags  "
+            "# HTTP up before weights are ready"
+        )
     return 0
 
 
