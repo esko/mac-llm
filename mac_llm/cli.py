@@ -9,8 +9,10 @@ from pathlib import Path
 
 from mac_llm import __version__
 from mac_llm.bench.swap import run_swap_benchmark
-from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager, render_start_command
+from mac_llm.roles.ask import AskError, run_ask
+from mac_llm.roles.config import ASK_CLI_ROLES
 from mac_llm.roles.select import UnknownRoleError, select_target
+from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager, render_start_command
 from mac_llm.runtime.smoke import run_smoke
 from mac_llm.runtime.target import UnknownTargetError, get_target
 
@@ -32,6 +34,29 @@ def _cmd_role_select(role: str, difficulty: str) -> int:
         "cache_strategy": result.cache_strategy,
     }
     sys.stdout.write(json.dumps(payload) + "\n")
+    return 0
+
+
+def _cmd_ask(role: str, prompt: str) -> int:
+    try:
+        result = run_ask(role, prompt, root=Path.cwd())
+    except UnknownRoleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AskError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if not result.success:
+        print(result.error or "ask failed", file=sys.stderr)
+        print(f"artifact: {result.artifact_path}", file=sys.stderr)
+        return 1
+
+    if result.response_text is not None:
+        sys.stdout.write(result.response_text)
+        if not result.response_text.endswith("\n"):
+            sys.stdout.write("\n")
+    print(f"artifact: {result.artifact_path}", file=sys.stderr)
     return 0
 
 
@@ -209,6 +234,18 @@ def main(argv: list[str] | None = None) -> None:
         help="Task difficulty hint for deep-escalation policy",
     )
 
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="Run a prompt with manual role selection (no automatic router)",
+    )
+    ask_parser.add_argument(
+        "--role",
+        required=True,
+        choices=sorted(ASK_CLI_ROLES),
+        help="Agent role for target selection",
+    )
+    ask_parser.add_argument("prompt", help="Prompt text")
+
     runtime_parser = subparsers.add_parser("runtime", help="Runtime management")
     runtime_subparsers = runtime_parser.add_subparsers(dest="runtime_command")
 
@@ -279,6 +316,9 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     args = parser.parse_args(argv)
+
+    if args.command == "ask":
+        raise SystemExit(_cmd_ask(args.role, args.prompt))
 
     if args.command == "role":
         if args.role_command == "select":

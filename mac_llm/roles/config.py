@@ -17,6 +17,8 @@ KNOWN_ROLES = frozenset(
     }
 )
 
+ASK_CLI_ROLES = frozenset({"coding", "planning", "review"})
+
 # Logical target ids allowed in role config before resolution to runtime targets.
 ROLE_TARGET_ALIASES: dict[str, str] = {
     "local_small_or_local_fast": "local_fast",
