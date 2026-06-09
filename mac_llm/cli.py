@@ -11,6 +11,7 @@ from mac_llm import __version__
 from mac_llm.bench.swap import run_swap_benchmark
 from mac_llm.runtime.manager import RuntimeLifecycleError, RuntimeManager, render_start_command
 from mac_llm.roles.select import UnknownRoleError, select_target
+from mac_llm.runtime.smoke import run_smoke
 from mac_llm.runtime.target import UnknownTargetError, get_target
 
 
@@ -165,6 +166,21 @@ def _cmd_runtime_orphan_check(target_id: str) -> int:
     return 1 if result.has_orphan else 0
 
 
+def _cmd_runtime_smoke(target_id: str, artifact_root: str | None) -> int:
+    try:
+        target = get_target(target_id)
+    except UnknownTargetError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    root = Path(artifact_root) if artifact_root else Path.cwd()
+    result = run_smoke(target, artifact_root=root)
+    payload = result.record.to_dict()
+    payload["artifact_dir"] = str(result.artifact_dir)
+    sys.stdout.write(json.dumps(payload) + "\n")
+    return 0 if result.record.status == "ok" else 1
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="mac-llm",
@@ -232,6 +248,16 @@ def main(argv: list[str] | None = None) -> None:
     )
     orphan_parser.add_argument("target_id", help="Runtime target id")
 
+    smoke_parser = runtime_subparsers.add_parser(
+        "smoke",
+        help="Run an OpenAI-compatible smoke request and write a benchmark artifact",
+    )
+    smoke_parser.add_argument("target_id", help="Runtime target id")
+    smoke_parser.add_argument(
+        "--artifact-root",
+        help="Directory root for benchmarks/runs artifacts (default: current directory)",
+    )
+
     bench_parser = subparsers.add_parser("bench", help="Benchmark commands")
     bench_subparsers = bench_parser.add_subparsers(dest="bench_command")
 
@@ -271,6 +297,8 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_runtime_health(args.target_id))
         if args.runtime_command == "orphan-check":
             raise SystemExit(_cmd_runtime_orphan_check(args.target_id))
+        if args.runtime_command == "smoke":
+            raise SystemExit(_cmd_runtime_smoke(args.target_id, args.artifact_root))
 
     if args.command == "bench":
         if args.bench_command == "swap":
