@@ -161,39 +161,95 @@ def generate_stream(engine, messages, bias=0.0, max_tokens=200):
         mx.eval(logits)
 
 
-def _gemma4_chat_text(tok, messages):
-    """Format messages for Gemma 4 instruct (disable thinking for direct replies)."""
+# Gemma 4 control token ids (see moe_agent_gemma4.py / google/gemma-4-26B-A4B-it)
+_GEMMA4_BOS = 2
+_GEMMA4_TURN_START = 105
+_GEMMA4_TURN_END = 106
+_GEMMA4_NEWLINE = 107
+def _gemma4_encode_piece(tok, text: str) -> list[int]:
+    """Encode one prompt fragment without adding another BOS."""
     try:
-        return tok.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-    except Exception:
-        try:
-            return tok.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+        enc = tok.encode(text, add_special_tokens=False)
+    except TypeError:
+        enc = tok.encode(text)
+    if hasattr(enc, "ids"):
+        return list(enc.ids)
+    return list(enc)
+
+
+def _gemma4_normalize_messages(messages: list[dict]) -> list[dict]:
+    """Fold system prompts into the next user turn (Gemma 4 has no system role)."""
+    normalized: list[dict] = []
+    pending_system: str | None = None
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "") or ""
+        if role == "system":
+            pending_system = (
+                f"{pending_system}\n\n{content}" if pending_system else content
             )
-        except Exception:
-            return messages[-1]["content"]
+            continue
+        if role == "user" and pending_system:
+            content = f"{pending_system}\n\n{content}"
+            pending_system = None
+        normalized.append({"role": role, "content": content})
+    if pending_system and not normalized:
+        normalized.append({"role": "user", "content": pending_system})
+    return normalized
+
+
+def _gemma4_chat_tokens(tok, messages: list[dict]) -> list[int]:
+    """Build Gemma 4 instruct tokens manually.
+
+    HF apply_chat_template is unreliable here: preprocess does not copy
+    chat_template.jinja, so tokenization often misses <|turn|> markers and the
+    model immediately emits EOS. Matches the working mlx-sniper reference layout.
+    """
+    nl = "\n"
+    tokens = [_GEMMA4_BOS, _GEMMA4_TURN_START]
+
+    for msg in _gemma4_normalize_messages(messages):
+        role = msg["role"]
+        content = msg["content"]
+        if role == "user":
+            tokens.extend(_gemma4_encode_piece(tok, "user" + nl))
+            tokens.extend(_gemma4_encode_piece(tok, content))
+        elif role == "assistant":
+            tokens.extend(_gemma4_encode_piece(tok, "model" + nl))
+            tokens.extend(_gemma4_encode_piece(tok, content))
+        else:
+            continue
+        tokens.extend([_GEMMA4_TURN_END, _GEMMA4_NEWLINE, _GEMMA4_TURN_START])
+
+    # Generation prompt: model turn (matches moe_agent_gemma4.py)
+    tokens.extend(_gemma4_encode_piece(tok, "model" + nl))
+    return tokens
+
+
+def _gemma4_generation_stop_ids(tok) -> set[int]:
+    """Stop tokens during Gemma 4 generation (<eos> and turn end)."""
+    stop = {_GEMMA4_TURN_END, 1}
+    if hasattr(tok, "eos_token_id"):
+        if isinstance(tok.eos_token_id, list):
+            stop.update(tok.eos_token_id)
+        elif tok.eos_token_id is not None:
+            stop.add(tok.eos_token_id)
+    return stop
 
 
 def _generate_stream_gemma4(engine, messages, max_tokens=200):
     """Generator for Gemma 4 — uses engine's own forward pass."""
     import mlx.core as mx
-    from .calibrate import _gemma4_eos_ids
 
     engine.reset_cache()
     tok = engine.tokenizer
-    text = _gemma4_chat_text(tok, messages)
-    tokens = tok.encode(text)
+    tokens = _gemma4_chat_tokens(tok, messages)
     input_ids = mx.array([tokens])
 
     logits = engine.forward(input_ids)
     mx.eval(logits)
 
-    eos_ids = _gemma4_eos_ids(tok)
+    eos_ids = _gemma4_generation_stop_ids(tok)
 
     for _ in range(max_tokens):
         token = mx.argmax(logits[:, -1, :], axis=-1)

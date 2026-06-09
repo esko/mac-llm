@@ -159,7 +159,7 @@ def preprocess_gemma4(input_dir, output_dir, quantize_experts=False):
     # Copy tokenizer
     import shutil
     for tf in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
-               "added_tokens.json", "tokenizer.model"]:
+               "added_tokens.json", "tokenizer.model", "chat_template.jinja"]:
         src = os.path.join(input_dir, tf)
         if os.path.exists(src):
             shutil.copy(src, os.path.join(output_dir, tf))
