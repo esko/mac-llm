@@ -58,6 +58,128 @@ Nine JSON-serializable artifact types (user task summary, git diff summary, tool
 - Host tools for the targets you use:
   - `local_fast` — `llama-server` (llama.cpp) on port **8080**
   - `local_deep_moe` — `mlx-sniper` on port **8081**
+- **Disk space** — ~6–8 GB for a fast GGUF; ~20–25 GB for a preprocessed deep MoE bundle
+- **Do not run both targets at once** — one active large model at a time
+
+---
+
+## Model setup
+
+`mac-llm` does not download models for you. Install the runtime binary, fetch or preprocess a model, then point environment variables at the on-disk path.
+
+### Recommended models (24 GB Mac Mini)
+
+Start with one fast model and one deep model. Do not benchmark every variant upfront.
+
+| Target | Suggested model | Format | Typical resident RAM | Band | Notes |
+|--------|-----------------|--------|-------------------|------|-------|
+| `local_fast` | **Qwen3.5-9B** (or latest Qwen 9B/12B equivalent) | GGUF `Q4_K_M` | ~6–8 GB | Green | Primary everyday coding / summarization target |
+| `local_fast` (later) | Mellum2, Gemma 4 QAT | GGUF / MLX | TBD by benchmark | Green–Yellow | Evaluate only after the primary fast path works |
+| `local_deep_moe` | **Qwen3.5-35B-A3B** | mlx-sniper preprocessed | ~9–12 GB active | Yellow | Primary deep target for planning / review / debugging |
+| `local_deep_moe` (fallback) | **Qwen3-30B-A3B** | mlx-sniper preprocessed | ~9–11 GB active | Yellow | Use if 35B is harder to fetch or preprocess |
+
+Orange/red bands (>17 GB resident) require a recorded benchmark and explicit approval before production use. See [`docs/24GB_PROFILE_POLICY.md`](docs/24GB_PROFILE_POLICY.md).
+
+Full candidate list and promotion rules: [`docs/RUNTIME_TARGETS.md`](docs/RUNTIME_TARGETS.md).
+
+### 1. Install `llama-server` (`local_fast`)
+
+Install llama.cpp so `llama-server` is on your `PATH`:
+
+```bash
+# Option A: Homebrew (simplest on macOS)
+brew install llama.cpp
+
+# Option B: build from source
+git clone https://github.com/ggerganov/llama.cpp.git
+cd llama.cpp
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+# add build/bin to PATH, or: ln -s "$(pwd)/build/bin/llama-server" ~/.local/bin/
+```
+
+Verify:
+
+```bash
+llama-server --version
+```
+
+### 2. Download a fast GGUF model
+
+Use any trusted GGUF source (Hugging Face is typical). Pick a **Q4_K_M** (or similar) quant of a 9B-class instruct/coder model.
+
+```bash
+pip install huggingface_hub
+
+# Example: download a Qwen 9B-class GGUF (check the model card for the exact file name)
+huggingface-cli download \
+  unsloth/Qwen2.5-Coder-7B-Instruct-GGUF \
+  Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  --local-dir ~/models/local_fast
+```
+
+Replace the repo and filename with the **Qwen3.5-9B Q4_K_M** (or current 9B/12B) artifact you intend to standardize on. The path must be a single `.gguf` file.
+
+```bash
+export MAC_LLM_MODEL_LOCAL_FAST=~/models/local_fast/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+```
+
+### 3. Install `mlx-sniper` (`local_deep_moe`)
+
+`mac-llm` expects the `mlx-sniper` CLI on `PATH`. The repo vendors a research copy; the packaged CLI lives under `research/expert-sniper/cli-agent/`:
+
+```bash
+cd research/expert-sniper/cli-agent
+pip install -e .
+```
+
+Or install the published package from [Hugging Face — mlx-expert-sniper](https://huggingface.co/waltgrace/mlx-expert-sniper) if you prefer not to use the vendored tree.
+
+Verify:
+
+```bash
+mlx-sniper --help
+```
+
+### 4. Preprocess a deep MoE model
+
+MoE models must be **preprocessed once** before serving. This splits expert weights for SSD streaming and takes significant disk space.
+
+```bash
+mkdir -p ~/models
+
+# Primary candidate (pick one to start)
+mlx-sniper preprocess mlx-community/Qwen3.5-35B-A3B-4bit -o ~/models/qwen35-35b-a3b
+
+# Fallback if the above is unavailable or too heavy
+# mlx-sniper preprocess mlx-community/Qwen3-30B-A3B-4bit -o ~/models/qwen3-30b-a3b
+```
+
+Preprocessing downloads weights from Hugging Face and writes a local directory (~20–25 GB free disk recommended for 35B-class models).
+
+Point `mac-llm` at the **preprocessed directory**, not the raw HF snapshot:
+
+```bash
+export MAC_LLM_MODEL_LOCAL_DEEP_MOE=~/models/qwen35-35b-a3b
+```
+
+### 5. Smoke-test both targets
+
+```bash
+# Fast path
+mac-llm runtime render local_fast
+mac-llm runtime start local_fast
+mac-llm runtime health local_fast
+mac-llm runtime stop local_fast
+
+# Deep path (stop local_fast first)
+mac-llm runtime render local_deep_moe
+mac-llm runtime start local_deep_moe
+mac-llm runtime smoke local_deep_moe
+mac-llm runtime stop local_deep_moe
+```
+
+Persist the variables in your shell profile (`~/.zshrc`, `~/.bashrc`, or fish `config.fish`) so managed starts survive new terminals.
 
 ---
 
@@ -95,11 +217,12 @@ Inspect what would be started for the fast target (no process launched):
 mac-llm runtime render local_fast
 ```
 
-### Start a local model (when installed)
+### Start a local model
+
+Complete [Model setup](#model-setup) first, then:
 
 ```bash
-export MAC_LLM_MODEL_LOCAL_FAST=/path/to/your-model.gguf
-
+# assumes MAC_LLM_MODEL_LOCAL_FAST is already exported
 mac-llm runtime start local_fast
 mac-llm runtime status local_fast
 mac-llm runtime health local_fast
@@ -129,8 +252,8 @@ Artifacts land in `benchmarks/runs/<timestamp>/`.
 
 | Variable | Used by | Purpose |
 |----------|---------|---------|
-| `MAC_LLM_MODEL_LOCAL_FAST` | `local_fast` | Path to the GGUF model for llama-server |
-| `MAC_LLM_MODEL_LOCAL_DEEP_MOE` | `local_deep_moe` | Path to the mlx-sniper model bundle |
+| `MAC_LLM_MODEL_LOCAL_FAST` | `local_fast` | Path to a single `.gguf` file for `llama-server` |
+| `MAC_LLM_MODEL_LOCAL_DEEP_MOE` | `local_deep_moe` | Path to a **preprocessed** mlx-sniper model directory |
 
 State and logs default to `~/.mac-llm/state/` and `~/.mac-llm/logs/`.
 
@@ -291,7 +414,8 @@ tests/             # Pytest suite
 - **Router not wired to CLI** — use `mac-llm ask --role` or `mac-llm role select` for now; automatic routing is library-only.
 - **External agents disabled by default** — consultation paths are dry-run / policy-gated until explicitly enabled in config.
 - **KV bench CLI** — requires full KV runtime runner integration; fails clearly with an artifact when the runtime layer is unavailable.
-- **Host binaries required** — `llama-server` and `mlx-sniper` must be installed and on `PATH`; `mac-llm` does not download models.
+- **Host binaries required** — `llama-server` and `mlx-sniper` must be installed and on `PATH`; see [Model setup](#model-setup).
+- **Models are manual** — download GGUF or preprocess MoE weights yourself; `mac-llm` only references paths via env vars.
 
 ---
 
