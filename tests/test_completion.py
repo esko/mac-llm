@@ -65,3 +65,53 @@ def test_run_completion_default_max_tokens() -> None:
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert payload["max_tokens"] == DEFAULT_MAX_TOKENS
+
+
+def test_run_completion_uses_reasoning_content_when_content_empty() -> None:
+    def fake_post_json(
+        url: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "reasoning_content": "RuntimeManager.ensure_inactive stops any managed runtime.",
+                    }
+                }
+            ],
+            "usage": {"completion_tokens": 12},
+        }
+
+    result = run_completion(
+        target=get_target("local_fast"),
+        prompt="hello",
+        post_json=fake_post_json,
+        timeout_seconds=10.0,
+    )
+
+    assert result.ok is True
+    assert "ensure_inactive" in (result.text or "")
+
+
+def test_run_completion_fails_on_empty_content_and_reasoning() -> None:
+    def fake_post_json(
+        url: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        return {"choices": [{"message": {"content": "", "reasoning_content": ""}}]}
+
+    result = run_completion(
+        target=get_target("local_fast"),
+        prompt="hello",
+        post_json=fake_post_json,
+        timeout_seconds=10.0,
+    )
+
+    assert result.ok is False
+    assert result.error == "completion returned empty content"

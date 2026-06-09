@@ -40,6 +40,19 @@ class CompletionResult:
     tokens_per_second: float | None = None
 
 
+def _extract_assistant_text(message: dict[str, Any]) -> str | None:
+    """Return assistant text from content, or reasoning_content for thinking models."""
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning
+
+    return None
+
+
 def completion_url_for_target(target: RuntimeTarget) -> str:
     """Derive the chat-completions URL from a target health URL."""
     parsed = urlparse(target.health_url)
@@ -67,6 +80,8 @@ def run_completion(
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "max_tokens": max_tokens,
+        # Gemma 4 / thinking models: disable thinking so content is populated.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     started = time.perf_counter()
     try:
@@ -103,9 +118,9 @@ def run_completion(
     if not isinstance(message, dict):
         return CompletionResult(ok=False, text=None, error="invalid completion message")
 
-    content = message.get("content")
-    if not isinstance(content, str):
-        return CompletionResult(ok=False, text=None, error="completion returned no content")
+    text = _extract_assistant_text(message)
+    if text is None:
+        return CompletionResult(ok=False, text=None, error="completion returned empty content")
 
     usage = response.get("usage")
     tokens_per_second: float | None = None
@@ -116,7 +131,7 @@ def run_completion(
 
     return CompletionResult(
         ok=True,
-        text=content,
+        text=text,
         error=None,
         ttft_ms=elapsed * 1000,
         tokens_per_second=tokens_per_second,
