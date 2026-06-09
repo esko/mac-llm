@@ -35,63 +35,131 @@ def _load_gemma4_tokenizer(model_dir: str):
         return AutoTokenizer.from_pretrained(model_dir, **kwargs)
 
 
-def run_expert_ffn_gemma4(x, expert_data, top_k_indices, top_k_weights,
-                           per_expert_scale=None):
-    """
-    Gemma 4 expert FFN with fused gate_up and Q8 quantized experts.
+def _gemma4_expert_tensor_keys(expert_data):
+    if not expert_data:
+        return set()
+    return set(next(iter(expert_data.values())).keys())
 
-    Expert data keys:
-      ffn_gate_up_exps.weight: [1408, 704] uint32 (Q8 packed)
-      ffn_gate_up_exps.scales: [1408, 88] float16
-      ffn_gate_up_exps.biases: [1408, 88] float16
-      ffn_down_exps.weight: [2816, 176] uint32 (Q8 packed)
-      ffn_down_exps.scales: [2816, 22] float16
-      ffn_down_exps.biases: [2816, 22] float16
-    """
+
+def _gemma4_local_indices(expert_data, top_k_indices):
     active_ids = sorted(expert_data.keys())
     id_to_local = {eid: i for i, eid in enumerate(active_ids)}
-
     inds_np = np.array(top_k_indices)
     local_np = np.vectorize(lambda v: id_to_local.get(int(v), 0))(inds_np)
-    local_indices = mx.array(local_np)
+    return active_ids, mx.array(local_np)
 
-    # Stack experts for batched gather_qmm
+
+def _gemma4_weighted_sum(out, top_k_weights):
+    weights = top_k_weights
+    if out.ndim == 4 and weights.ndim == 3:
+        weights = mx.expand_dims(weights, -1)
+    return (out * weights).sum(axis=-2)
+
+
+def _run_expert_ffn_gemma4_streaming_bf16(
+    x, expert_data, top_k_indices, top_k_weights, per_expert_scale=None
+):
+    """Sniper preprocess_gemma4 layout: bf16 experts.gate_up_proj + experts.down_proj."""
+    active_ids, local_indices = _gemma4_local_indices(expert_data, top_k_indices)
+
+    gate_up = mx.stack([expert_data[eid]["experts.gate_up_proj"] for eid in active_ids])
+    down = mx.stack([expert_data[eid]["experts.down_proj"] for eid in active_ids])
+    gate_up_rhs = gate_up.swapaxes(-1, -2)
+    down_rhs = down.swapaxes(-1, -2)
+
+    if x.ndim == 3:
+        B, L, D = x.shape
+        x_flat = x.reshape(-1, D)
+        inds_flat = local_indices.reshape(-1, local_indices.shape[-1])
+    else:
+        B, L = None, None
+        x_flat = x.reshape(-1, x.shape[-1])
+        inds_flat = local_indices.reshape(-1, local_indices.shape[-1])
+
+    x_expanded = mx.expand_dims(mx.expand_dims(x_flat, -2), -2)
+    gate_up_out = mx.gather_mm(x_expanded, gate_up_rhs, rhs_indices=inds_flat)
+    gate_up_out = gate_up_out.squeeze(-2)
+    gate, up = mx.split(gate_up_out, 2, axis=-1)
+    hidden = nn.gelu_approx(gate) * up
+
+    hidden_expanded = mx.expand_dims(hidden, -2)
+    out = mx.gather_mm(hidden_expanded, down_rhs, rhs_indices=inds_flat)
+    out = out.squeeze(-2)
+
+    if B is not None:
+        out = out.reshape(B, L, top_k_indices.shape[-1], -1)
+
+    if per_expert_scale is not None:
+        expert_scales = mx.array([per_expert_scale[int(eid)] for eid in active_ids])
+        scale_per_token = mx.take(expert_scales, local_indices)
+        top_k_weights = top_k_weights * scale_per_token
+
+    return _gemma4_weighted_sum(out, top_k_weights)
+
+
+def _run_expert_ffn_gemma4_q8(x, expert_data, top_k_indices, top_k_weights, per_expert_scale=None):
+    """GGUF Q8 layout: ffn_gate_up_exps.* and ffn_down_exps.* tensors."""
+    active_ids, local_indices = _gemma4_local_indices(expert_data, top_k_indices)
+
     gate_up_w = mx.stack([expert_data[eid]["ffn_gate_up_exps.weight"] for eid in active_ids])
     gate_up_s = mx.stack([expert_data[eid]["ffn_gate_up_exps.scales"] for eid in active_ids])
     gate_up_b = mx.stack([expert_data[eid]["ffn_gate_up_exps.biases"] for eid in active_ids])
-
     down_w = mx.stack([expert_data[eid]["ffn_down_exps.weight"] for eid in active_ids])
     down_s = mx.stack([expert_data[eid]["ffn_down_exps.scales"] for eid in active_ids])
     down_b = mx.stack([expert_data[eid]["ffn_down_exps.biases"] for eid in active_ids])
 
     x_exp = mx.expand_dims(x, (-2, -3))
-
-    # Fused gate+up projection via gather_qmm
-    gate_up_out = mx.gather_qmm(x_exp, gate_up_w, scales=gate_up_s, biases=gate_up_b,
-        rhs_indices=local_indices, transpose=True, group_size=GROUP_SIZE, bits=BITS)
-
-    # Split fused output into gate and up halves
+    gate_up_out = mx.gather_qmm(
+        x_exp,
+        gate_up_w,
+        scales=gate_up_s,
+        biases=gate_up_b,
+        rhs_indices=local_indices,
+        transpose=True,
+        group_size=GROUP_SIZE,
+        bits=BITS,
+    )
     gate, up = mx.split(gate_up_out, 2, axis=-1)
-
-    # GELU activation (Gemma 4 uses gelu_pytorch_tanh)
     hidden = nn.gelu_approx(gate) * up
-
-    # Down projection
-    down_out = mx.gather_qmm(hidden, down_w, scales=down_s, biases=down_b,
-        rhs_indices=local_indices, transpose=True, group_size=GROUP_SIZE, bits=BITS)
-
+    down_out = mx.gather_qmm(
+        hidden,
+        down_w,
+        scales=down_s,
+        biases=down_b,
+        rhs_indices=local_indices,
+        transpose=True,
+        group_size=GROUP_SIZE,
+        bits=BITS,
+    )
     out = down_out.squeeze(-2)
 
-    # Apply per-expert scale if provided
     if per_expert_scale is not None:
         expert_scales = mx.array([per_expert_scale[int(eid)] for eid in active_ids])
-        # Broadcast scale to match gather output
-        # top_k_weights already normalized, multiply by per_expert_scale
         scale_per_token = mx.take(expert_scales, local_indices)
         top_k_weights = top_k_weights * scale_per_token
 
-    out = (out * top_k_weights[..., None]).sum(axis=-2)
-    return out
+    return _gemma4_weighted_sum(out, top_k_weights)
+
+
+def run_expert_ffn_gemma4(x, expert_data, top_k_indices, top_k_weights,
+                           per_expert_scale=None):
+    """Gemma 4 expert FFN for streamed experts (bf16) or GGUF Q8 layouts."""
+    if not expert_data:
+        return mx.zeros_like(x)
+
+    keys = _gemma4_expert_tensor_keys(expert_data)
+    if "experts.gate_up_proj" in keys:
+        return _run_expert_ffn_gemma4_streaming_bf16(
+            x, expert_data, top_k_indices, top_k_weights, per_expert_scale
+        )
+    if "ffn_gate_up_exps.weight" in keys:
+        return _run_expert_ffn_gemma4_q8(
+            x, expert_data, top_k_indices, top_k_weights, per_expert_scale
+        )
+    raise KeyError(
+        "unsupported Gemma 4 expert tensor layout: "
+        f"{sorted(keys)} (expected experts.gate_up_proj or ffn_gate_up_exps.weight)"
+    )
 
 
 class MoESniperEngineGemma4:
